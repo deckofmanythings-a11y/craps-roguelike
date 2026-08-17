@@ -76,6 +76,7 @@
       relics: [],        // filled by the shop slice
       over: false,
       won: false,
+      anteWon: false,    // Critical Pips: skip the rest of this ante on next advance
       round: null,       // runtime round state, set by startRound
     };
   }
@@ -143,23 +144,38 @@
   }
 
   // Advance to the next round after a clear (Small→Big→Boss→next Ante).
-  // Marks the run won after the final Boss. No-op if the run is over.
+  // A Critical Pips ante-win (run.anteWon) jumps straight to the next Ante's
+  // Small, skipping the rest of the current ante. Marks the run won after the
+  // final Boss. No-op if the run is over.
   function advance(run) {
     if (run.over) return run;
-    run.roundIdx++;
-    if (run.roundIdx > 2) {
-      run.roundIdx = 0;
-      run.anteIdx++;
-      if (run.anteIdx >= TOTAL_ANTES) { run.over = true; run.won = true; run.anteIdx = TOTAL_ANTES - 1; }
+    if (run.anteWon) { run.anteWon = false; run.roundIdx = 0; run.anteIdx++; }
+    else {
+      run.roundIdx++;
+      if (run.roundIdx > 2) { run.roundIdx = 0; run.anteIdx++; }
     }
+    if (run.anteIdx >= TOTAL_ANTES) { run.over = true; run.won = true; run.anteIdx = TOTAL_ANTES - 1; }
     run.round = null;
     return run;
+  }
+
+  // Critical Pips: instantly clear the current round AND flag the ante as won so
+  // the next advance() skips to the next ante. Banks the leftover-bullet reward.
+  function winAnte(run) {
+    const r = run.round;
+    if (!r || r.cleared) return;
+    r.bulletActive = false;
+    r.cleared = true;
+    r.leftoverBullets = r.bulletsLeft;
+    r.reward = REWARD_BASE + r.leftoverBullets * REWARD_PER_LEFTOVER;
+    run.markers += r.reward;
+    run.anteWon = true;
   }
 
   return {
     STAKE, MIN_BET, ROUND_NAMES, ANTES, DEBUFFS, TOTAL_ANTES,
     REWARD_BASE, REWARD_PER_LEFTOVER,
     newRun, roundCfg, minBet, label, debuffInfo,
-    startRound, canStartBullet, startBullet, endBullet, advance,
+    startRound, canStartBullet, startBullet, endBullet, advance, winAnte,
   };
 });

@@ -190,10 +190,13 @@ body{
 .face-slot.filled{border-color:var(--color-gold);color:#fff;font-size:13px}
 .face-slot.gold{background:radial-gradient(circle,#6a5210,#241c05)}
 .face-slot.glass{background:radial-gradient(circle,#2a5a6a,#0a2028)}
-.face-slot.lucky{background:radial-gradient(circle,#2a6a3a,#0a2814)}
 .face-slot.guardian{background:radial-gradient(circle,#5a2a6a,#200a28)}
 .face-slot.heavy{background:radial-gradient(circle,#5a4a2a,#28200a)}
+.face-slot.critical{background:radial-gradient(circle,#7a1e1e,#280a0a)}
+.face-slot.magnet{background:radial-gradient(circle,#3a3a5a,#12121e)}
+.face-slot.field{background:radial-gradient(circle,#1e6a3a,#0a2814)}
 .face-slot.installable{cursor:pointer;border-color:var(--color-win);box-shadow:0 0 8px rgba(74,222,128,.6);animation:pulse 1s infinite}
+.face-slot.locked{opacity:.3}
 @keyframes pulse{50%{box-shadow:0 0 14px rgba(74,222,128,.9)}}
 
 /* ---- consumable tray ---- */
@@ -475,9 +478,10 @@ body{
     G.s.Bankroll = 0;
     const res = CR.resolve(G.s, d1, d2);
     G.stake += G.s.Bankroll;
-    // Relic winnings (payout/felt multipliers, Gold/Glass/Lucky faces).
-    const fx = RLC.postResolve(G.run, res, d1, d2, G.bulletState, Math.random);
+    // Relic winnings (payout/felt multipliers, face relics).
+    const fx = RLC.postResolve(G.run, res, d1, d2, G.bulletState, Math.random, RL.minBet(G.run));
     G.stake += fx.extra;
+    if (fx.diamondBreak) G.run.diamondOffer = true;  // a Glass/Crystal broke -> next shop offers Diamond Pips
     runChipSweeps(preKeys, res);              // winners drop in, losers sweep away
     G.lastRoll = res;
     G.rolling = false;
@@ -491,6 +495,8 @@ body{
     if (fx.events.length) msg += '  [relics: ' + fx.events.join(', ') + ']';
 
     message(msg);  // always announce the roll
+    // Critical Pips: instantly win the whole ante.
+    if (fx.winAnte) { RL.winAnte(G.run); render(); WinnerModal.show(Math.max(G.stake - RL.STAKE, 1), { big: true }); setTimeout(showRoundClear, 900); return; }
     // The round clears the instant this bullet's net hits target.
     if (net >= G.run.round.target) { finishBullet(net); return; }
     // A seven-out does NOT end the bullet — the resolver reset us to a fresh
@@ -623,15 +629,16 @@ body{
   function renderInstall() {
     const { relic } = G.shop.install;
     if (relic.type === 'face') {
-      const grid = (die) => RLC.def && G.run.faces[die].map((slot, idx) => {
+      const grid = (die) => G.run.faces[die].map((slot, idx) => {
         const filled = !!slot;
-        const cls = filled ? 'filled ' + slot.kind : 'installable';
-        return `<div class="face-slot ${cls}" data-die="${die}" data-idx="${idx}" ${filled ? '' : 'data-empty="1"'}>
+        const canHere = !filled && die === relic.die;   // this relic is locked to its die
+        const cls = filled ? 'filled ' + slot.kind : (canHere ? 'installable' : 'locked');
+        return `<div class="face-slot ${cls}" data-die="${die}" data-idx="${idx}" ${canHere ? 'data-empty="1"' : ''}>
           <span class="fv">${idx + 1}</span>${filled ? faceGlyph(slot.kind) : ''}</div>`;
       }).join('');
       overlay(
         `<h2 style="margin:0 0 4px">Install ${relic.name}</h2>
-        <div class="install-hint">Click an open face to install. ${relic.pref === RLC.DIE.ROXY ? 'Leans Roxy (physics).' : 'Leans Trixie (payout).'}</div>
+        <div class="install-hint">Goes on a <b>${relic.die === RLC.DIE.ROXY ? 'ROXY' : 'TRIXIE'}</b> face — click an open one.</div>
         <div class="install-dice">
           <div class="die-col roxy"><div class="nm">ROXY</div><div class="faces">${grid(1)}</div></div>
           <div class="die-col trixie"><div class="nm">TRIXIE</div><div class="faces">${grid(2)}</div></div>
@@ -665,7 +672,7 @@ body{
     render();
   }
   function faceGlyph(kind) {
-    return { gold: '$', glass: '◆', lucky: '★', guardian: '🛡', heavy: '⬇' }[kind] || '●';
+    return { gold: '$', glass: '◆', guardian: '🛡', heavy: '⬇', critical: '★', magnet: '⊘', field: '✦' }[kind] || '●';
   }
 
   function leaveShop() {
@@ -796,10 +803,11 @@ body{
 
   // --- custom 3D dice face art for installed face relics ---
   const FACE_TINTS = {
-    gold: ['#fff0b0', '#c8930a'], glass: ['#bfe8ff', '#3a7a9a'], lucky: ['#bff0c8', '#2a8a4a'],
+    gold: ['#fff0b0', '#c8930a'], glass: ['#bfe8ff', '#3a7a9a'],
     guardian: ['#e6c8ff', '#6a2aa0'], heavy: ['#dccaa0', '#5a4a2a'],
+    critical: ['#ffc9c9', '#a01e1e'], magnet: ['#d9d9e6', '#4a4a66'], field: ['#c9f0d2', '#1e7a3a'],
   };
-  const CANVAS_GLYPH = { gold: '$', glass: '◆', lucky: '★', guardian: '✚', heavy: '▼' };
+  const CANVAS_GLYPH = { gold: '$', glass: '◆', guardian: 'G', heavy: '▼', critical: '*', magnet: 'O', field: 'F' };
   function drawFaceArt(value, kind) {
     const S = 256, c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d');
     const t = FACE_TINTS[kind] || ['#faf6ea', '#d9d2bd'];

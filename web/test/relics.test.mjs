@@ -31,9 +31,9 @@ const freshRun = () => R.initRun(RL.newRun());
 
 // --- price discount economy relic ---
 { const run = freshRun();
-  eq('base price', 5, R.priceOf(run, R.def('face_gold5')));
+  eq('base price', 5, R.priceOf(run, R.def('face_gold_t')));
   R.acquireSimple(run, R.def('eco_discount'));
-  eq('discounted price', 4, R.priceOf(run, R.def('face_gold5'))); }
+  eq('discounted price', 4, R.priceOf(run, R.def('face_gold_t'))); }
 
 // --- reroll cost climbs, voucher lowers ---
 { const run = freshRun();
@@ -56,47 +56,91 @@ const freshRun = () => R.initRun(RL.newRun());
   const { extra } = R.postResolve(run, res, 1, 1, {}, () => 0.99);
   near('felt +50% on field adds +10', 10, extra); }
 
-// --- gold face pays when that die shows that face ---
+// --- Golden Pips pays the current Min Bet when its face lands ---
 { const run = freshRun();
-  R.installFace(run, R.def('face_gold5'), 2, 3); // Trixie (die2) face value 4
-  let res = { wins: {} };
-  let r = R.postResolve(run, res, 6, 4, {}, () => 0.99); // die2 shows 4
-  near('gold pays when face lands', 5, r.extra);
-  r = R.postResolve(run, res, 6, 5, {}, () => 0.99);     // die2 shows 5, not 4
-  near('gold silent when face absent', 0, r.extra); }
+  R.installFace(run, R.def('face_gold_t'), 2, 3); // Trixie face value 4
+  let r = R.postResolve(run, { wins: {} }, 6, 4, {}, () => 0.99, 10); // minBet 10, die2 shows 4
+  near('Golden Pips pays +Min Bet', 10, r.extra);
+  r = R.postResolve(run, { wins: {} }, 6, 5, {}, () => 0.99, 10);
+  near('Golden Pips silent when face absent', 0, r.extra); }
 
-// --- glass doubles a win then can shatter once ---
+// --- Bullion pays 2x Min Bet ---
 { const run = freshRun();
-  R.installFace(run, R.def('face_glass2'), 2, 0); // Trixie face value 1
+  R.installFace(run, R.def('face_bullion'), 2, 0); // Trixie face value 1
+  const r = R.postResolve(run, { wins: {} }, 6, 1, {}, () => 0.99, 15);
+  near('Bullion pays +2x Min Bet', 30, r.extra); }
+
+// --- Glass doubles a win, can break, and a break can queue Diamond Pips ---
+{ const run = freshRun();
+  R.installFace(run, R.def('face_glass_t'), 2, 0); // Trixie face value 1
   const bs = {};
   const res = { wins: { field: 20 } };
-  let r = R.postResolve(run, res, 6, 1, bs, () => 0.99); // baseWin 20, no shatter (0.99>0.25)
-  near('glass x2 adds +20', 20, r.extra);
-  r = R.postResolve(run, res, 6, 1, bs, () => 0.01);     // shatters this time
-  near('glass still pays the turn it breaks', 20, r.extra);
-  r = R.postResolve(run, res, 6, 1, bs, () => 0.99);     // broken now -> nothing
+  let r = R.postResolve(run, res, 6, 1, bs, () => 0.99, 5); // no break
+  near('Glass x2 adds +20', 20, r.extra);
+  check('no diamond without a break', r.diamondBreak === false);
+  r = R.postResolve(run, res, 6, 1, bs, () => 0.01, 5); // breaks (0.01<.25) and queues diamond (0.01<.5)
+  near('Glass still pays the turn it breaks', 20, r.extra);
+  check('break queues Diamond Pips', r.diamondBreak === true);
+  r = R.postResolve(run, res, 6, 1, bs, () => 0.99, 5);
   near('shattered glass pays nothing', 0, r.extra); }
 
-// --- heavy weights the opposite face most, adjacents slightly, self lowest ---
+// --- Diamond Pips only appears after a break flag is set ---
 { const run = freshRun();
-  R.installFace(run, R.def('face_heavy'), 1, 0); // Roxy face value 1 -> boosts opposite (6)
-  const w = R.diceWeights(run);
-  eq('die1 face6 (opposite) full boost', 2, w[1][5]);   // 1 + bias(1)
-  near('die1 face2 (adjacent) slight boost', 1.25, w[1][1]); // 1 + 1*0.25
-  near('die1 face5 (adjacent) slight boost', 1.25, w[1][4]);
-  eq('die1 face1 (heavy self) lowest/unchanged', 1, w[1][0]);
-  eq('die2 untouched', 1, w[2][5]); }
+  let shop = R.generateShop(run, () => 0.3);
+  check('no Diamond by default', !shop.relics.some((x) => x.id === 'face_diamond'));
+  run.diamondOffer = true;
+  shop = R.generateShop(run, () => 0.3);
+  check('Diamond offered after a break', shop.relics.some((x) => x.id === 'face_diamond'));
+  check('diamondOffer cleared after showing', run.diamondOffer === false); }
 
-// --- guardian swaps the first would-be seven-out in a hand ---
+// --- Weighted Side: opposite only. Heavy Side: opposite + adjacent ---
 { const run = freshRun();
-  R.installFace(run, R.def('face_guardian'), 2, 5);
+  R.installFace(run, R.def('face_weighted'), 1, 0); // Roxy face1 -> boosts 6, no adjacent
+  let w = R.diceWeights(run);
+  eq('Weighted: opposite +bias', 2, w[1][5]);
+  eq('Weighted: no adjacent boost', 1, w[1][1]);
+  const run2 = freshRun();
+  R.installFace(run2, R.def('face_heavy'), 1, 0);   // Heavy Side bias 1.6, adj .25
+  w = R.diceWeights(run2);
+  near('Heavy: opposite +1.6', 2.6, w[1][5]);
+  near('Heavy: adjacent +bias*.25', 1.4, w[1][1]); }
+
+// --- Magnet pair: both dice must carry a Magnet face to zero those faces ---
+{ const run = freshRun();
+  R.installFace(run, R.def('face_magnet_r'), 1, 2); // Roxy face3
+  eq('single magnet does nothing', 1, R.diceWeights(run)[1][2]);
+  R.installFace(run, R.def('face_magnet_t'), 2, 4); // Trixie face5
+  const w = R.diceWeights(run);
+  eq('both magnets: Roxy face3 zeroed', 0, w[1][2]);
+  eq('both magnets: Trixie face5 zeroed', 0, w[2][4]); }
+
+// --- Guardian flips its own face to the opposite on a point-phase 7 ---
+{ const run = freshRun();
+  R.installFace(run, R.def('face_guardian'), 2, 3); // Trixie face value 4
   const bs = {};
-  // rng forces a 7 (3+4) first, then a 5 (2+3) on redraw
-  let seq = [ (3-0.5)/6, (4-0.5)/6, (2-0.5)/6, (3-0.5)/6 ]; let i = 0;
-  const rng = () => seq[i++];
-  const [d1, d2] = R.rollDice(run, rng, bs, { pointPhase: true });
+  let seq = [(3 - 0.5) / 6, (4 - 0.5) / 6]; let i = 0; // force d1=3, d2=4 (sum 7, die2 shows the guardian 4)
+  const [d1, d2] = R.rollDice(run, () => seq[i++], bs, { pointPhase: true });
   check('guardian avoided the 7', d1 + d2 !== 7);
+  eq('guardian flipped its die to opposite (3)', 3, d2);
   check('guardian marked used', bs.guardianUsed === true); }
+
+// --- Critical Pips can win the ante ---
+{ const run = freshRun();
+  R.installFace(run, R.def('face_critical'), 2, 5); // Trixie face value 6
+  check('Critical fires below chance', R.postResolve(run, { wins: {} }, 1, 6, {}, () => 0.01, 5).winAnte === true);
+  check('Critical silent above chance', R.postResolve(run, { wins: {} }, 1, 6, {}, () => 0.99, 5).winAnte === false); }
+
+// --- Abbott + Costello: single doubles a Field win, both = 10x ---
+{ const run = freshRun();
+  R.installFace(run, R.def('face_abbott'), 1, 2);   // Roxy face value 3
+  near('Abbott alone doubles Field (+20)', 20, R.postResolve(run, { wins: { field: 20 } }, 3, 4, {}, () => 0.99, 5).extra);
+  R.installFace(run, R.def('face_costello'), 2, 3); // Trixie face value 4
+  near('Abbott + Costello = 10x Field (+180)', 180, R.postResolve(run, { wins: { field: 20 } }, 3, 4, {}, () => 0.99, 5).extra); }
+
+// --- face relics are locked to their die on install ---
+{ const run = freshRun();
+  check('cannot install a Trixie relic on Roxy', R.installFace(run, R.def('face_gold_t'), 1, 0) === false);
+  check('can install a Trixie relic on Trixie', R.installFace(run, R.def('face_gold_t'), 2, 0) === true); }
 
 // --- shop generation shapes ---
 { const run = freshRun();

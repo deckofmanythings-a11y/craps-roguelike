@@ -50,14 +50,23 @@
     // -- felt relics (install on a bet spot, spent) --
     { id: 'felt_boost',     name: 'Loaded Spot', type: 'felt',   tier: 'common',   price: 6,  mult: 1.5, desc: 'Install on any bet spot: it pays +50%.' },
 
-    // -- face relics (install on a die face, spent) --
-    { id: 'face_gold5',   name: 'Gold Pip',   type: 'face', tier: 'common',   price: 5,  face: { kind: 'gold', amount: 5 },  pref: DIE.TRIXIE, desc: '+$5 to your stake every time this face lands.' },
-    { id: 'face_gold10',  name: 'Bullion',    type: 'face', tier: 'uncommon', price: 10, face: { kind: 'gold', amount: 10 }, pref: DIE.TRIXIE, desc: '+$10 to your stake every time this face lands.' },
-    { id: 'face_glass2',  name: 'Glass Pip',  type: 'face', tier: 'common',   price: 6,  face: { kind: 'glass', mult: 2, brk: 0.25 }, pref: DIE.TRIXIE, desc: 'When this face helps win a roll, DOUBLE that win. 25% to shatter (once) after.' },
-    { id: 'face_glass3',  name: 'Crystal Pip', type: 'face', tier: 'uncommon', price: 10, face: { kind: 'glass', mult: 3, brk: 0.25 }, pref: DIE.TRIXIE, desc: 'When this face helps win a roll, TRIPLE that win. 25% to shatter (once) after.' },
-    { id: 'face_lucky',   name: 'Lucky Pip',  type: 'face', tier: 'common',   price: 5,  face: { kind: 'lucky', chance: 0.05, jackpot: 50 }, pref: DIE.TRIXIE, desc: '5% chance of a +$50 jackpot whenever this face lands.' },
-    { id: 'face_guardian', name: 'Guardian',  type: 'face', tier: 'rare',     price: 20, face: { kind: 'guardian' }, pref: DIE.TRIXIE, desc: 'Once per hand, the first 7 that would seven-out is swapped to a safe number.' },
-    { id: 'face_heavy',   name: 'Heavy Pip',  type: 'face', tier: 'common',   price: 5,  face: { kind: 'heavy', bias: 1.0 }, pref: DIE.ROXY, desc: 'Weights this die so the OPPOSITE face lands more often. Best paired with a face relic on that opposite face (same die).' },
+    // -- face relics: each is FIXED to a die (Roxy=1 / Trixie=2); the player still
+    //    chooses WHICH of that die's 6 faces to install it on. Spent on install, no slot.
+    { id: 'face_gold_t',  name: 'Golden Pips', type: 'face', tier: 'common',   price: 5,  die: DIE.TRIXIE, face: { kind: 'gold', mult: 1 }, desc: '+$(current Min Bet) to your stake every time this face lands.' },
+    { id: 'face_gold_r',  name: 'Golden Pips', type: 'face', tier: 'rare',     price: 20, die: DIE.ROXY,   face: { kind: 'gold', mult: 1 }, desc: '+$(current Min Bet) to your stake every time this face lands.' },
+    { id: 'face_bullion', name: 'Bullion',     type: 'face', tier: 'uncommon', price: 10, die: DIE.TRIXIE, face: { kind: 'gold', mult: 2 }, desc: '+2x (current Min Bet) to your stake every time this face lands.' },
+    { id: 'face_glass_t', name: 'Glass Pips',  type: 'face', tier: 'common',   price: 5,  die: DIE.TRIXIE, face: { kind: 'glass', mult: 2, brk: 0.25, diamond: 0.5 }, desc: 'DOUBLE a win this face helps make. 25% to break after; on break, 50% the next shop offers Diamond Pips.' },
+    { id: 'face_glass_r', name: 'Glass Pips',  type: 'face', tier: 'rare',     price: 20, die: DIE.ROXY,   face: { kind: 'glass', mult: 2, brk: 0.25, diamond: 0.5 }, desc: 'DOUBLE a win this face helps make. 25% to break after; on break, 50% the next shop offers Diamond Pips.' },
+    { id: 'face_crystal', name: 'Crystal Pips', type: 'face', tier: 'uncommon', price: 10, die: DIE.TRIXIE, face: { kind: 'glass', mult: 3, brk: 0.25, diamond: 1.0 }, desc: 'TRIPLE a win this face helps make. 25% to break after; on break, the next shop offers Diamond Pips.' },
+    { id: 'face_diamond', name: 'Diamond Pips', type: 'face', tier: 'rare',    price: 25, die: DIE.TRIXIE, unique: true, face: { kind: 'glass', mult: 4, brk: 0, diamond: 0 }, desc: 'QUADRUPLE a win this face helps make. Only appears after a Glass/Crystal Pips breaks.' },
+    { id: 'face_weighted', name: 'Weighted Side', type: 'face', tier: 'common', price: 5,  die: DIE.ROXY, face: { kind: 'heavy', bias: 1.0, adj: 0 }, desc: 'Weights this die so the OPPOSITE face lands more often (no adjacent boost). Best paired with a face relic on that opposite face, SAME die.' },
+    { id: 'face_heavy',    name: 'Heavy Side',   type: 'face', tier: 'rare',   price: 20, die: DIE.ROXY, face: { kind: 'heavy', bias: 1.6, adj: 0.25 }, desc: 'Weights the OPPOSITE face even more than Weighted Side (+slight boost to adjacent faces). Best paired on the opposite face, SAME die.' },
+    { id: 'face_magnet_r', name: 'Magnet Side', type: 'face', tier: 'uncommon', price: 10, die: DIE.ROXY,   face: { kind: 'magnet' }, desc: "This side can't be rolled while Magnet Side (Trixie) is also active." },
+    { id: 'face_magnet_t', name: 'Magnet Side', type: 'face', tier: 'rare',     price: 20, die: DIE.TRIXIE, face: { kind: 'magnet' }, desc: "This side can't be rolled while Magnet Side (Roxy) is also active." },
+    { id: 'face_guardian', name: 'Guardian',   type: 'face', tier: 'common',  price: 5,  die: DIE.TRIXIE, face: { kind: 'guardian' }, desc: 'If this side would make a 7 on a non-come-out roll, it becomes the OPPOSITE side instead (once per bullet).' },
+    { id: 'face_critical', name: 'Critical Pips', type: 'face', tier: 'rare',  price: 20, die: DIE.TRIXIE, face: { kind: 'critical', chance: 0.05 }, desc: '5% chance to immediately WIN THE ANTE when this face comes up.' },
+    { id: 'face_abbott',  name: 'Abbott',      type: 'face', tier: 'uncommon', price: 10, die: DIE.ROXY,   face: { kind: 'field', role: 'abbott' }, desc: 'Doubles Field payouts if this side is used to win a Field bet (Abbott + Costello together = 10x).' },
+    { id: 'face_costello', name: 'Costello',   type: 'face', tier: 'rare',     price: 20, die: DIE.TRIXIE, face: { kind: 'field', role: 'costello' }, desc: 'Doubles Field payouts if this side is used to win a Field bet (Abbott + Costello together = 10x).' },
 
     // -- economy relics (occupy a slot) --
     { id: 'eco_interest', name: 'Interest',    type: 'economy', tier: 'uncommon', price: 10, economy: { kind: 'interest', per: 5, cap: 5 }, desc: 'At each shop, +1 Marker for every 5 Markers you hold (max +5).' },
@@ -90,6 +99,7 @@
     run.unlocks = {};                             // bet-type -> true
     STARTER_UNLOCKS.forEach((u) => { run.unlocks[u] = true; });
     run.consumables = [];                         // consumable ids held (<= MAX_CONSUMABLES)
+    run.diamondOffer = false;                     // set when a Glass/Crystal breaks -> next shop offers Diamond Pips
     return run;
   }
 
@@ -128,35 +138,43 @@
     else if (relic.type === 'consumable') run.consumables.push(relic.id);
   }
   function installFace(run, relic, die, faceIdx) {
+    if (relic.die && relic.die !== die) return false;   // this relic is fixed to its die
     if (run.faces[die][faceIdx]) return false;
-    run.faces[die][faceIdx] = { id: relic.id, kind: relic.face.kind };
+    run.faces[die][faceIdx] = { id: relic.id, kind: relic.face.kind, die };
     return true;
   }
+  // First installed face slot of a given kind (any die). Returns {die, idx, id} or null.
+  function findFace(run, kind) {
+    for (const die of [1, 2]) for (let idx = 0; idx < 6; idx++) {
+      const s = run.faces[die][idx];
+      if (s && s.kind === kind) return { die, idx, id: s.id };
+    }
+    return null;
+  }
+  function magnetIdx(run, die) { for (let i = 0; i < 6; i++) { const s = run.faces[die][i]; if (s && s.kind === 'magnet') return i; } return -1; }
   function installFelt(run, relic, betKey) {
     run.feltMult[betKey] = (run.feltMult[betKey] || 1) * relic.mult;
     return true;
   }
 
-  // ---- effect logic (ports Simulator/Program.cs) ------------------------
-  // Fraction of a Heavy's bias the four ADJACENT faces get (the heavy face's
-  // weight pulls its own edges down a little, so those faces land up slightly
-  // more often too — not just the opposite face).
-  const HEAVY_SIDE_FACTOR = 0.25;
-
-  // Per-die weights from Heavy faces: a Heavy on face f most strongly boosts the
-  // OPPOSITE face (7-f) on the SAME die, gives the four adjacent faces a slight
-  // boost, and leaves the heavy face itself lowest (never boosted).
+  // ---- effect logic -----------------------------------------------------
+  // Per-die weights. A Heavy/Weighted face on face f boosts the OPPOSITE face
+  // (7-f) by its bias, plus its four adjacent faces by bias*adj (Weighted adj=0,
+  // Heavy adj=0.25). Magnet: if BOTH dice carry a Magnet face, each magnet face's
+  // weight is zeroed so it can't be rolled (single Magnet does nothing).
   function diceWeights(run) {
     const w = { 1: [1, 1, 1, 1, 1, 1], 2: [1, 1, 1, 1, 1, 1] };
     [1, 2].forEach((die) => {
       run.faces[die].forEach((slot, idx) => {
         if (slot && slot.kind === 'heavy') {
-          const f = idx + 1, opp = 7 - f, bias = def(slot.id).face.bias;
+          const f = idx + 1, opp = 7 - f, fc = def(slot.id).face, bias = fc.bias, adj = fc.adj || 0;
           w[die][opp - 1] += bias;
-          for (let v = 1; v <= 6; v++) if (v !== f && v !== opp) w[die][v - 1] += bias * HEAVY_SIDE_FACTOR;
+          if (adj > 0) for (let v = 1; v <= 6; v++) if (v !== f && v !== opp) w[die][v - 1] += bias * adj;
         }
       });
     });
+    const m1 = magnetIdx(run, 1), m2 = magnetIdx(run, 2);
+    if (m1 >= 0 && m2 >= 0) { w[1][m1] = 0; w[2][m2] = 0; }
     return w;
   }
   function rollWeighted(w, rng) {
@@ -165,30 +183,50 @@
     for (let i = 0; i < 6; i++) { r -= w[i]; if (r <= 0) return i + 1; }
     return 6;
   }
-  // Roll both dice honouring Heavy weights + an armed Loaded-Dice consumable.
-  // Guardian is applied here too: the first would-be seven-out in a hand is
-  // redrawn to a non-7. bulletState carries per-hand flags. Returns [d1,d2].
+  // Roll both dice honouring Heavy/Magnet weights, then two seven-savers:
+  //  - Loaded Dice (opts.noSeven): full redraw until it isn't a point-phase 7.
+  //  - Guardian: if the guardian's OWN face made a point-phase 7, that die flips
+  //    to its opposite face instead (once per bullet). bulletState.lastSwap flags
+  //    that a swap happened (for the message). Returns [d1,d2].
   function rollDice(run, rng, bulletState, opts) {
     const w = diceWeights(run);
     let d1 = rollWeighted(w[1], rng), d2 = rollWeighted(w[2], rng);
-    const noSeven = opts && opts.noSeven;             // Loaded Dice consumable
-    const hasGuardian = run.faces[1].concat(run.faces[2]).some((s) => s && s.kind === 'guardian');
-    const wantSwap = (opts && opts.pointPhase) && (d1 + d2 === 7) &&
-      ((noSeven) || (hasGuardian && !bulletState.guardianUsed));
-    if (wantSwap) {
-      if (hasGuardian && !noSeven) bulletState.guardianUsed = true;
+    const pointPhase = !!(opts && opts.pointPhase);
+    if (bulletState) bulletState.lastSwap = false;
+    if (pointPhase && d1 + d2 === 7 && opts && opts.noSeven) {
       if (bulletState) bulletState.lastSwap = true;
       do { d1 = rollWeighted(w[1], rng); d2 = rollWeighted(w[2], rng); } while (d1 + d2 === 7);
-    } else if (bulletState) bulletState.lastSwap = false;
+      return [d1, d2];
+    }
+    if (pointPhase && d1 + d2 === 7 && bulletState && !bulletState.guardianUsed) {
+      const g = findFace(run, 'guardian');
+      if (g) {
+        const fv = g.idx + 1;
+        if ((g.die === 1 ? d1 : d2) === fv) {   // the guardian's own face is what made the 7
+          if (g.die === 1) d1 = 7 - fv; else d2 = 7 - fv;
+          bulletState.guardianUsed = true;
+          bulletState.lastSwap = true;
+        }
+      }
+    }
     return [d1, d2];
   }
 
   const shows = (die, faceIdx, d1, d2) => (die === 1 ? d1 : d2) === (faceIdx + 1);
 
-  // Post-resolution winnings modifiers. Returns { extra, events:[] }.
-  // extra is added to the bullet stake (same money the base win went into).
-  function postResolve(run, res, d1, d2, bulletState, rng) {
-    let extra = 0;
+  // Face on `die` at `idx` matching (kind, role) is currently showing?
+  function faceShowing(run, kind, role, d1, d2) {
+    for (const die of [1, 2]) for (let idx = 0; idx < 6; idx++) {
+      const s = run.faces[die][idx];
+      if (s && s.kind === kind && shows(die, idx, d1, d2) && def(s.id).face.role === role) return true;
+    }
+    return false;
+  }
+
+  // Post-resolution modifiers. `minBet` scales Gold faces. Returns
+  // { extra, events, winAnte, diamondBreak }.
+  function postResolve(run, res, d1, d2, bulletState, rng, minBet) {
+    let extra = 0, winAnte = false, diamondBreak = false;
     const events = [];
     let baseWin = 0;
     for (const k in res.wins) baseWin += res.wins[k];
@@ -206,20 +244,31 @@
       run.faces[die].forEach((slot, idx) => {
         if (!slot || !shows(die, idx, d1, d2)) return;
         const f = def(slot.id).face;
-        if (f.kind === 'gold') { extra += f.amount; events.push(`Gold +$${f.amount}`); }
-        else if (f.kind === 'lucky') { if (rng() < f.chance) { extra += f.jackpot; events.push(`LUCKY +$${f.jackpot}!`); } }
+        if (f.kind === 'gold') { const amt = (f.mult || 1) * (minBet || 0); if (amt > 0) { extra += amt; events.push(`Gold +$${amt}`); } }
+        else if (f.kind === 'critical') { if (rng() < f.chance) { winAnte = true; events.push('CRITICAL - Ante won!'); } }
         else if (f.kind === 'glass') {
           const bk = die + ':' + idx;
           bulletState.glassBroken = bulletState.glassBroken || {};
           if (baseWin > 0 && !bulletState.glassBroken[bk]) {
             const add = baseWin * (f.mult - 1);
-            extra += add; events.push(`Glass x${f.mult} +$${add.toFixed(0)}`);
-            if (rng() < f.brk) { bulletState.glassBroken[bk] = true; events.push('Glass shattered!'); }
+            if (add > 0) { extra += add; events.push(`x${f.mult} +$${add.toFixed(0)}`); }
+            if (f.brk > 0 && rng() < f.brk) {
+              bulletState.glassBroken[bk] = true; events.push('shattered!');
+              if (rng() < (f.diamond || 0)) diamondBreak = true;
+            }
           }
         }
       });
     });
-    return { extra, events };
+
+    // Abbott/Costello: double a Field win via a specific face; both showing = 10x
+    if (res.wins.field) {
+      const ab = faceShowing(run, 'field', 'abbott', d1, d2);
+      const co = faceShowing(run, 'field', 'costello', d1, d2);
+      const acMult = (ab && co) ? 10 : (ab || co) ? 2 : 1;
+      if (acMult > 1) { const add = res.wins.field * (acMult - 1); extra += add; events.push(`Field x${acMult} +$${add.toFixed(0)}`); }
+    }
+    return { extra, events, winAnte, diamondBreak };
   }
 
   // ---- shop generation --------------------------------------------------
@@ -244,8 +293,10 @@
   // Build a shop: 2 relics (payout/felt/face/economy mix), 1 consumable,
   // table access if anything's still locked, and an occasional voucher.
   function generateShop(run, rng) {
-    const relicPool = CATALOG.filter((r) => ['payout', 'felt', 'face', 'economy'].includes(r.type));
+    const relicPool = CATALOG.filter((r) => ['payout', 'felt', 'face', 'economy'].includes(r.type) && !r.unique);
     const relics = sample(relicPool, 2, rng);
+    // Diamond Pips only appears the shop AFTER a Glass/Crystal Pips broke.
+    if (run.diamondOffer) { relics.unshift(def('face_diamond')); run.diamondOffer = false; }
     const consumables = sample(CATALOG.filter((r) => r.type === 'consumable'), 1, rng);
     const tablePool = CATALOG.filter((r) => r.type === 'table' && !run.unlocks[r.table.unlock]);
     const table = tablePool.length ? [weightedPick(tablePool, rng)] : [];
