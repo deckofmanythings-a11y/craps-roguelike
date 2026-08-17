@@ -1,0 +1,1566 @@
+/* ============================================================
+   cloche-dice.js
+   Shared 3D physics dice overlay for the bubble machine tables.
+
+   Requires (load before this file):
+     three.js r128   https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js
+     cannon.js 0.6.2 https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js
+
+   SERVER-AUTHORITATIVE DESIGN
+   The module never decides the roll. The host page calls:
+
+     const result = await ClocheDice.roll(serverPromise);
+
+   where serverPromise resolves to an array of die values from the
+   Edge Function, e.g. [3, 4] for craps or [2, 5, 5] for sic-bo.
+   The overlay appears, the dice agitate for at least minAgitateMs
+   and for as long as the server takes, then a final launch is made
+   whose outcome is guaranteed to display the server values.
+
+   HOW THE FORCED LANDING WORKS
+   1. Snapshot the physics state at the moment of the final launch.
+   2. Silently pre-simulate the launch and settle with a seeded RNG
+      and fixed 1/120 timestep to learn which face of each die lands
+      up naturally.
+   3. Restore the snapshot, relabel each die's face textures so the
+      natural landing face shows the server value (opposite faces
+      still sum to 7), then replay the identical simulation live.
+   4. Safety net: when the live dice settle, the natural face is
+      verified. If floating point ever diverges from the pre-sim,
+      faces are relabeled at rest before reveal. Either way the
+      displayed values are exactly the server values.
+
+   INTEGRATION (craps, 2 dice at 2.0):
+     ClocheDice.init({ diceCount: 2, dieSize: 2.0 });
+     ...
+     const data = await ClocheDice.roll(callRollEdgeFunction());
+     // data = { values: [3, 4], total: 7, forced: true }
+     // overlay has closed; update the inline static dice with data.values
+
+   INTEGRATION (sic-bo, 3 dice at 1.8):
+     ClocheDice.init({ diceCount: 3, dieSize: 1.8 });
+
+   roll() also accepts a plain array for local testing:
+     ClocheDice.roll([6, 1]);
+   ============================================================ */
+(function (global) {
+  'use strict';
+
+  // The tables declare a top-level `let THREE` that is only assigned inside
+  // initDice() after login. That lexical global shadows window.THREE for
+  // bare references in every script on the page, so bind explicitly to the
+  // real libraries here. Same treatment for CANNON as cheap insurance.
+  const THREE = global.THREE;
+  const CANNON = global.CANNON;
+  if (!THREE || !CANNON) {
+    console.error('cloche-dice.js: three.js and cannon.js must be loaded first');
+    return;
+  }
+
+  // ---------- config ----------
+  const CFG = {
+    diceCount: 2,
+    dieSize: 2.0,
+    clocheRadius: 3.8,
+    clocheHeight: 7.5,
+    gravity: -34,
+    minAgitateMs: 1400,     // agitate at least this long even on fast servers
+    buzzMs: 750,            // vibration-only lead-in before launches
+    settleSpeed: 0.18,
+    flatThreshold: 0.99,
+    holdSteps: 48,          // 0.4s at 120hz of flat+still before reading
+    maxResolveSteps: 120 * 25,
+    presimAttempts: 5,
+    revealHoldMs: 1000,     // overlay lingers on the settled dice
+    faceImages: null,       // optional {1: dataURL, ... 6: dataURL} custom faces, all dice
+    faceImagesPerDie: null, // optional [{1:url,...6:url}, ...] -- distinct faces per die index
+                             // (e.g. destroyer's letter die vs number die), overrides faceImages
+    // The 2/3-point-toward-6 rotation math (pipRotationTowardFace) assumes a face's "baseline"
+    // (untransformed) art already has its point pip at canvas (.28,.28). That's true for the
+    // procedural pip drawing and for Sic-Bo's real dice art, but Craps' DIE_B64 art happens to
+    // draw the 2's two dots on the *other* diagonal -- a 90-degree mismatch baked into that one
+    // image, unrelated to the geometry. {value: 90} here says "this face's real art starts
+    // rotated 90 degrees from the procedural baseline", so the computed toward-6 rotation gets
+    // that offset folded in (via applyPipBaseRotation) before it's applied to the real texture.
+    pipBaseRotation: null,  // optional {2: 90, 3: 90, ...} per-value baseline correction (degrees)
+    pipDepressions: true,   // false skips the carved-dimple normal map, flat printed pips instead
+    wallSegments: 14,
+    // 'cloche' = the glass bell jar every other game uses; dice are shaken straight up inside it.
+    // 'wall'   = Street Craps: dice are THROWN at a brick wall, bounce off and settle on asphalt.
+    // Defaults to 'cloche' so craps-standard/crapless, Sic-Bo and Destroyer are untouched -- the
+    // wall arena is strictly additive and only reachable by opting in via init({arena:'wall'}).
+    // Everything downstream (scene build, start positions, launch impulse, out-of-bounds clamp)
+    // branches on this one flag; the resolve/face-reading/relabel machinery is shared verbatim,
+    // so a wall roll is exactly as server-faithful as a cloche roll.
+    arena: 'cloche',
+    zIndex: 9999,
+    soundTheme: 'bell'      // 'bell' (default jovial chime) or 'action' (dramatic low drums +
+                             // rising brass-stab tension for destroyer's missile-strike rolls)
+  };
+
+  const PLATFORM_Y = 0.35;
+  const STEP = 1 / 120;
+
+  // ---------- wall arena (Street Craps) ----------
+  // A back wall to throw against, asphalt underfoot, and invisible side/front/ceiling bounds so
+  // a hot throw can't leave the playfield. Sized so the camera (0,8.5,12.5 looking at 0,2.6,0)
+  // frames the wall behind the landing zone without moving the camera at all -- the cloche and
+  // the alley share one view, which keeps every other game's framing untouched.
+  const ARENA = { halfW: 6.5, height: 9.5, wallZ: -5.5, frontZ: 7.5, handY: 4.6 };
+  const isWall = () => CFG.arena === 'wall';
+
+  // Seamless running-bond brick, drawn rather than shipped as an image: it tiles by construction
+  // (courses offset by half a brick, edges wrap), so there's no crop-and-tile seam of the kind a
+  // photo would need. Also keeps the wall a zero-asset feature.
+  function brickTexture() {
+    const BW = 128, BH = 56, MORTAR = 7;   // one brick + its mortar gutter
+    const c = document.createElement('canvas');
+    c.width = BW * 2; c.height = BH * 2;   // two courses so the half-brick offset repeats
+    const g = c.getContext('2d');
+    g.fillStyle = '#2e2b29'; g.fillRect(0, 0, c.width, c.height);   // mortar
+    const face = (x, y, w, h, seed) => {
+      // Slight per-brick colour jitter so a wall of identical bricks doesn't read as wallpaper.
+      // Muted and dark on purpose -- this is a wall in an alley at night, not fresh facing brick,
+      // and the scene's key light already pushes it several stops brighter than these numbers.
+      const r = 78 + ((seed * 37) % 26), gr = 42 + ((seed * 17) % 16), b = 36 + ((seed * 11) % 12);
+      g.fillStyle = 'rgb(' + r + ',' + gr + ',' + b + ')';
+      g.fillRect(x, y, w, h);
+      g.fillStyle = 'rgba(0,0,0,.18)';            // bottom/right shading for a little relief
+      g.fillRect(x, y + h - 3, w, 3); g.fillRect(x + w - 3, y, 3, h);
+      g.fillStyle = 'rgba(255,255,255,.05)';      // top highlight
+      g.fillRect(x, y, w, 2);
+    };
+    // course 0 flush, course 1 offset by half a brick and wrapped at both edges
+    for (let i = -1; i <= 2; i++) {
+      face(i * BW, 0, BW - MORTAR, BH - MORTAR, i + 3);
+      face(i * BW + BW / 2, BH, BW - MORTAR, BH - MORTAR, i + 9);
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    // Scale matters for believability: the wall mesh is ~17 world units across and a die is 2,
+    // so at repeat(3,2) each "brick" came out wider than a die and read as red panelling. Nine
+    // tiles across puts a brick at roughly 0.9 units -- under half a die, which is about right.
+    t.repeat.set(9, 7);
+    t.anisotropy = 4;
+    return t;
+  }
+  // Asphalt: dark base plus scattered aggregate speckle, matching the CSS street felt in
+  // craps.html so the 3D floor and the 2D board read as the same surface.
+  function asphaltTexture() {
+    const S = 256;
+    const c = document.createElement('canvas'); c.width = c.height = S;
+    const g = c.getContext('2d');
+    g.fillStyle = '#232326'; g.fillRect(0, 0, S, S);
+    for (let i = 0; i < 1400; i++) {
+      const x = Math.random() * S, y = Math.random() * S, r = Math.random() * 1.6 + 0.3;
+      const v = 40 + Math.floor(Math.random() * 55);
+      g.fillStyle = 'rgba(' + v + ',' + v + ',' + (v + 4) + ',' + (0.25 + Math.random() * 0.5) + ')';
+      g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(4, 4);
+    t.anisotropy = 4;
+    return t;
+  }
+
+  // face pairs in BoxGeometry material order [+x,-x,+y,-y,+z,-z]
+  // opposite face of index i is (i ^ 1)
+  const DEFAULT_FACE_VALUES = [1, 6, 2, 5, 3, 4];
+  const FACE_NORMALS = [
+    new CANNON.Vec3(1, 0, 0), new CANNON.Vec3(-1, 0, 0),
+    new CANNON.Vec3(0, 1, 0), new CANNON.Vec3(0, -1, 0),
+    new CANNON.Vec3(0, 0, 1), new CANNON.Vec3(0, 0, -1)
+  ];
+
+  // Deck: the 2 and 3 faces' pips should always point toward wherever the 6 face currently is
+  // -- a fixed property of a real physical die, true no matter how the die is oriented, not just
+  // "when 6 happens to be up". relabelDie() below reassigns which VALUE sits on which geometry
+  // face every roll (whichever face physics landed up gets the target value, the rest follow
+  // fixed opposite-faces-sum-to-7 pairing), so "the face holding 2" and "the face holding 6" are
+  // BOTH different geometry faces from roll to roll -- there's no single fixed rotation that
+  // works for value 2's texture in general, it has to be recomputed against whichever two
+  // faces actually ended up holding 2/3 and 6 this time.
+  //
+  // FACE_UP/FACE_RIGHT are BoxGeometry's actual default UV axes per face (material order
+  // matches FACE_NORMALS: [+x,-x,+y,-y,+z,-z]) -- read directly off a real BoxGeometry's
+  // position/uv attributes rather than assumed, since adjacent box faces do NOT all share the
+  // same UV "up" by default (a well-known BoxGeometry quirk that makes eyeballing this wrong).
+  const FACE_UP = [
+    [0, 1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [0, 1, 0], [0, 1, 0]
+  ];
+  const FACE_RIGHT = [
+    [0, 0, -1], [0, 0, 1], [1, 0, 0], [1, 0, 0], [1, 0, 0], [-1, 0, 0]
+  ];
+  // Where a value's "point" pip (the canvas (.28,.28) corner of the 2/3 diagonal patterns --
+  // see faceTexture()) actually lands in world space for a given face + 0-or-90-degree texture
+  // rotation, vs. the CUBE VERTEX shared by this face, the face holding 6, and the face holding
+  // the other of {2,3}. On a real die 2, 3 and 6 all meet at one corner (confirmed against real
+  // casino dice: 6 up, 3 front-left, 2 front-right -- all three mutually adjacent), so that's
+  // the actual target, not merely "somewhere on the edge shared with 6". Using just the shared-
+  // edge midpoint is ambiguous: that edge's two endpoints are the {2,3,6} corner (correct) and
+  // the {2,6,other} corner (wrong, e.g. lands next to 4 instead of 3) -- both are equally "close
+  // to the edge", so the edge-only test picks the wrong one on roughly half of all relabels. The
+  // 2/3 pip diagonal is 180-degree-symmetric (rotating it 180 degrees redraws the exact same
+  // pixels), so there are only ever two visually distinct rotations -- but the pattern always
+  // draws BOTH diagonal dots at once, and which of the two ends up nearest the target vertex
+  // depends on the rotation too, so both dots (not just the canvas (.28,.28) one) must be tested
+  // against the vertex -- checking only one dot picks the wrong rotation in most cases, since the
+  // *other* dot is frequently the one that actually reaches the target corner.
+  function pipRotationTowardFace(faceIdx, otherFaceIdx, sixFaceIdx) {
+    const N = FACE_NORMALS.map(v => [v.x, v.y, v.z]);
+    const up = FACE_UP[faceIdx], right = FACE_RIGHT[faceIdx];
+    const vertex = [
+      (N[faceIdx][0] + N[otherFaceIdx][0] + N[sixFaceIdx][0]) * 0.5,
+      (N[faceIdx][1] + N[otherFaceIdx][1] + N[sixFaceIdx][1]) * 0.5,
+      (N[faceIdx][2] + N[otherFaceIdx][2] + N[sixFaceIdx][2]) * 0.5
+    ];
+    function pipPos(rot90, cx, cy) {
+      let u = (cx - .5) * 2, v = -(cy - .5) * 2;
+      if (rot90) { const nu = v, nv = -u; u = nu; v = nv; }
+      return [
+        N[faceIdx][0] * 0.5 + right[0] * u * 0.4 + up[0] * v * 0.4,
+        N[faceIdx][1] * 0.5 + right[1] * u * 0.4 + up[1] * v * 0.4,
+        N[faceIdx][2] * 0.5 + right[2] * u * 0.4 + up[2] * v * 0.4
+      ];
+    }
+    function dist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]); }
+    function nearestDist(rot90) {
+      return Math.min(dist(pipPos(rot90, .28, .28), vertex), dist(pipPos(rot90, .72, .72), vertex));
+    }
+    return nearestDist(false) <= nearestDist(true) ? 0 : Math.PI / 2;
+  }
+  // Folds CFG.pipBaseRotation's per-value correction into a computed 0/PI-2 rotation. The pip
+  // pattern is 180-degree-symmetric, so two 90-degree offsets cancel out (90+90=180 looks
+  // identical to 0) -- this is exactly an XOR of the two "is it rotated 90" flags, not a sum.
+  function applyPipBaseRotation(rot, value) {
+    const baseDeg = (CFG.pipBaseRotation && CFG.pipBaseRotation[value]) || 0;
+    const rotIsHalf = rot === Math.PI / 2;
+    const baseIsHalf = (((baseDeg % 180) + 180) % 180) !== 0;
+    return (rotIsHalf !== baseIsHalf) ? Math.PI / 2 : 0;
+  }
+  // Rotation (radians, 0 or PI/2) to apply this relabel -- only 2 and 3 have a meaningful
+  // "point" (1/4/5/6's patterns are rotationally symmetric), so every other face gets 0.
+  // Returns two parallel 6-length arrays indexed by geometry face, matching `values`:
+  //   tex -- for faceTexture(), with CFG.pipBaseRotation folded in so a face whose real art
+  //          has a baked-in diagonal offset (e.g. Craps' DIE_B64[2]) still displays correctly.
+  //   geo -- for faceNormalMap(), WITHOUT that correction. The dimples are carved straight
+  //          from PIP_POS, which has no idea any particular image's pips start on the "wrong"
+  //          diagonal -- feeding it the art-corrected `tex` value (as a single shared array
+  //          used to) rotates the dents by CFG.pipBaseRotation's offset relative to where the
+  //          color pips actually land, landing them in the blank field instead of on the dot.
+  function pipRotationsForValues(values) {
+    const tex = [0, 0, 0, 0, 0, 0], geo = [0, 0, 0, 0, 0, 0];
+    const i6 = values.indexOf(6);
+    if (i6 < 0) return { tex, geo };
+    const i2 = values.indexOf(2), i3 = values.indexOf(3);
+    if (i2 >= 0 && i3 >= 0) {
+      geo[i2] = pipRotationTowardFace(i2, i3, i6);
+      geo[i3] = pipRotationTowardFace(i3, i2, i6);
+      tex[i2] = applyPipBaseRotation(geo[i2], 2);
+      tex[i3] = applyPipBaseRotation(geo[i3], 3);
+    }
+    return { tex, geo };
+  }
+
+  // ---------- module state ----------
+  let inited = false;
+  let overlayEl, stageEl, labelEl;
+  let scene, camera, renderer, world, platformMesh;
+  let matDie, matSurface, matGlass, matBrick, matAsphalt;
+  let dice = [];
+  let rafId = null;
+  let lastTime = 0;
+
+  // phase: idle | preroll | resolving | reveal
+  let phase = 'idle';
+  let prerollT0 = 0, prerollNextThump = 0;
+  let serverValues = null;
+  let resolveCtx = null;      // deterministic replay context
+  let stepDebt = 0;
+  let activeResolve = null, activeReject = null;
+  let rollT0 = 0;
+  let resultCallbacks = [];
+  // Body-pair keys currently in contact, as of the last _checkCollisionsForKnock() call --
+  // lets a NEW collision be told apart from a die that's just resting/sliding in continuous
+  // contact (which would otherwise re-fire a knock on every single physics substep).
+  let _touchingPairs = new Set();
+
+  // ---------- jovial random-note bell chime (dice tumble + coin waterfall both use this) ----------
+  // Synthesized rather than sampled -- the real thing to match here (InterBlock/Easy
+  // Craps/Crapless Craps electronic tables' cloche sound) is proprietary casino equipment
+  // audio, not something legally available to source or reuse. A tiny Web Audio synth gets the
+  // same "random notes while the dice tumble" character with zero licensing concerns, and syncs
+  // exactly to however long a given roll's preroll+resolving phases actually last.
+  let _actx = null, _noteTimer = null, _reverbSend = null, _echoSend = null, _muted = false;
+  // Site-wide volume level (0-1, set via ClocheDice.setVolume() -- see AudioSettings in
+  // audio-settings.js). Distinct from _muted: a caller-driven binary "this specific dice
+  // instance should never make sound" flag, vs. the player's own global volume preference.
+  // 0 behaves identically to _muted (silences via the _ensureAudio() choke point below).
+  let _masterVolume = 1;
+  // Deck supplied a reference recording (CrapsRoll.ogg) and asked for the same TYPE OF TONE --
+  // not the file itself, same licensing reason the earlier bell-chime version cites: a real
+  // recording isn't something to source/reuse, but a synth nailing the same character has zero
+  // licensing concerns.
+  //
+  // First pass (FFT per short onset window) mistook the ~700Hz peak for a knock resonance and
+  // built a loud, ~6ms percussive "clack" as the dominant sound -- wrong. Redone with proper
+  // harmonic/percussive source separation (median-filtering HPSS: horizontal-in-time median
+  // isolates sustained tones, vertical-in-time median isolates broadband transients) on the
+  // FULL clip: 82.6% of the total energy is harmonic/tonal, only 17.4% is percussive. Deck
+  // confirmed by ear -- "the dominating sound in the file is sing-songy tones," clacks present
+  // but secondary. Within that tonal energy, F5 (~698Hz) alone is ~58% of it, with G#5/C#5/G#4
+  // as smaller supporting voices (a fourth, a major sixth, and an octave above G#4 -- a real,
+  // intentional chord, not noise).
+  //
+  // Second pass played ONE of these per chime event and faked brightness with an added octave
+  // overtone on that single note -- wrong on both counts. Rendered the synth and directly
+  // compared it against the reference's isolated harmonic audio: scanned every frame for the
+  // single "purest" (least-polyphonic) moment in the whole clip, and even THAT moment had its
+  // dominant pitch carrying only 24% of the frame's tonal energy -- the other three notes were
+  // still clearly sounding at the same time. The reference is a near-continuous CLUSTER of
+  // multiple pitches ringing together, not one voice at a time, and its brightness comes from
+  // that polyphony, not from added harmonics on a single note. There's also a recurring low
+  // ~108Hz layer (close to A2) present in about 1 in 6 frames that the synth had no equivalent
+  // of at all. `prob` below is each voice's chance of joining a given chime event -- F5 is
+  // effectively an always-on anchor, the rest layer on top the way they actually do in the
+  // source.
+  const MELODY_VOICES = [
+    { freq: 698.46, gain: 0.30, prob: 1.00 }, // F5  -- anchor, virtually always present
+    { freq: 830.61, gain: 0.18, prob: 0.55 }, // G#5
+    { freq: 554.37, gain: 0.15, prob: 0.40 }, // C#5
+    { freq: 415.30, gain: 0.13, prob: 0.35 }  // G#4
+  ];
+  const LOW_DRONE = { freq: 108, gain: 0.20, prob: 0.17 }; // ~A2, ~1-in-6 frames in the reference
+  // The remaining 17.4%, percussive part -- real dice-on-surface knocks, dark and dry, decaying
+  // to -6dB in ~6ms. Now the quiet undercurrent instead of the lead.
+  const KNOCK_FREQS = [625, 656, 688, 719, 750, 781, 813];
+  // Builds a synthetic impulse response for ConvolverNode -- decaying filtered noise, the
+  // standard way to get a smooth algorithmic reverb tail without needing to source/license an
+  // actual recorded impulse response file.
+  function _makeImpulseResponse(ctx, duration, decayPower) {
+    const rate = ctx.sampleRate, length = Math.floor(rate * duration);
+    const impulse = ctx.createBuffer(2, length, rate);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = impulse.getChannelData(ch);
+      for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decayPower);
+    }
+    return impulse;
+  }
+  // One shared reverb (smooth wash) + echo (discrete repeats) bus that every note's dry signal
+  // gets sent into, rather than building a convolver/delay chain per note -- notes fire every
+  // 30-180ms, so overlapping tails from a shared bus is exactly what makes it sound like one
+  // continuous chime-y space instead of each note being cut off dry.
+  function _buildEffects(ctx) {
+    const convolver = ctx.createConvolver();
+    convolver.buffer = _makeImpulseResponse(ctx, 2.0, 2.3);
+    const reverbOut = ctx.createGain(); reverbOut.gain.value = 0.6;
+    convolver.connect(reverbOut); reverbOut.connect(ctx.destination);
+    _reverbSend = ctx.createGain(); _reverbSend.gain.value = 1;
+    _reverbSend.connect(convolver);
+
+    const delay = ctx.createDelay(1.0); delay.delayTime.value = 0.22;
+    const feedback = ctx.createGain(); feedback.gain.value = 0.4;
+    const echoOut = ctx.createGain(); echoOut.gain.value = 0.5;
+    delay.connect(feedback); feedback.connect(delay); // feedback loop -> repeating echoes
+    delay.connect(echoOut); echoOut.connect(ctx.destination);
+    _echoSend = ctx.createGain(); _echoSend.gain.value = 1;
+    _echoSend.connect(delay);
+  }
+  function _ensureAudio() {
+    // Single choke point for every sound this module makes (chime notes, dice knocks, action
+    // drums) -- every one of them already does `const ctx = _ensureAudio(); if (!ctx) return;`,
+    // so returning null here silently mutes all of them without touching each sound function.
+    if (_muted || _masterVolume <= 0) return null;
+    if (!_actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      _actx = new AC();
+      _buildEffects(_actx);
+    }
+    if (_actx.state === 'suspended') _actx.resume().catch(() => {});
+    return _actx;
+  }
+  // volume scales the overall level -- used by the coin waterfall to read as louder/more
+  // excited than the dice tumble without actually being a different instrument.
+  //
+  // Deck's follow-up: the melody sounded "muted, like underwater," and the knock "dominates."
+  // The muddiness traced to the shared reverb/echo bus -- every note was sent in at full (1x)
+  // send gain, and with notes firing every 80-180ms into a 2s reverb tail, the wash piles up
+  // fast and blurs the pitch definition. Split into two fully independent functions (own sound,
+  // own routing, playable alone). KNOCK_GAIN is the clacks' own level; the melody cluster below
+  // has no single equivalent "gain" anymore (see playMelodyNote) since it's several voices at
+  // once, but each voice's level was chosen relative to KNOCK_GAIN so the cluster as a whole
+  // reads as louder than the clacks, same intent as the old literal 1.8x ratio.
+  const KNOCK_GAIN = 0.22;
+  function playChimeNote(volume) {
+    const ctx = _ensureAudio(); if (!ctx) return;
+    volume = (volume == null ? 1 : volume) * _masterVolume;
+    playMelodyNote(volume);
+    playKnockSound(volume);
+  }
+  function _playVoice(freq, gain, attackMs, decayMs, ctx, t, volume) {
+    const master = ctx.createGain();
+    master.gain.value = gain * volume;
+    master.connect(ctx.destination); // dry -- carries the definition
+    const wetSend = ctx.createGain(); wetSend.gain.value = 0.18; // light space, not a wash
+    master.connect(wetSend);
+    wetSend.connect(_reverbSend);
+    wetSend.connect(_echoSend);
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = freq;
+    const a = attackMs / 1000, d = decayMs / 1000;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(1, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + a + d);
+    osc.connect(g); g.connect(master);
+    osc.start(t); osc.stop(t + a + d + 0.02);
+  }
+  // The singing chime, entirely on its own -- and now actually polyphonic. Rendering the old
+  // single-note-plus-fake-shimmer version and directly comparing it against the reference's
+  // isolated harmonic audio showed it was structurally wrong: the source is a near-continuous
+  // CLUSTER of multiple pitches ringing together (even its most isolated single-pitch moment
+  // still had 3+ other notes sounding at 76% of that moment's total tonal energy), not one
+  // brightened voice at a time. Each call now independently rolls every voice in MELODY_VOICES
+  // (F5 is practically an always-on anchor) plus LOW_DRONE, so a real cluster forms instead of
+  // a monophonic pick -- the "brightness" comes from real polyphony now, not synthetic overtones.
+  //
+  // Decay lengthened 200ms->320ms (drone 260ms->350ms) after a spectrogram comparison showed
+  // the actual staccato-vs-legato bug: bandpass-tracking the reference's F5 band across the
+  // whole clip found it stays above -20dB in 85% of all frames -- essentially continuous, not
+  // discrete blips -- because dense onsets (~37ms apart, see startTumbleNotes) heavily overlap
+  // each note's ring. Matching the onset density alone with the old short decay still produced
+  // visibly separated bursts in a side-by-side spectrogram; lengthening the decay too is what
+  // actually closed the gap into one continuous singing texture like the reference's.
+  //
+  // Timing here (attack/decay) scaled *1.25, *2, *2, then *(2/3) (a 50% speed-up after three
+  // successive slow-downs) -- net *3.333 on the original 3/320ms and 6/350ms, alongside the
+  // matching *3.333 on startTumbleNotes' tick interval -- scaling both together keeps the
+  // decay-to-onset-interval ratio the same, so the legato overlap character is preserved at
+  // whatever the current pace is instead of reintroducing gaps.
+  function playMelodyNote(volume) {
+    const ctx = _ensureAudio(); if (!ctx) return;
+    volume = (volume == null ? 1 : volume) * _masterVolume;
+    const t = ctx.currentTime;
+    MELODY_VOICES.forEach(v => {
+      if (Math.random() < v.prob) _playVoice(v.freq, v.gain, 10, 1066.7, ctx, t, volume);
+    });
+    if (Math.random() < LOW_DRONE.prob) _playVoice(LOW_DRONE.freq, LOW_DRONE.gain, 20, 1166.7, ctx, t, volume);
+  }
+  // The dice-clack, entirely on its own: real dice-on-surface knock character (tonal thump +
+  // bandpassed noise click), decaying to -6dB in ~6ms.
+  function playKnockSound(volume) {
+    const ctx = _ensureAudio(); if (!ctx) return;
+    volume = (volume == null ? 1 : volume) * _masterVolume;
+    const freq = KNOCK_FREQS[Math.floor(Math.random() * KNOCK_FREQS.length)];
+    const t = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.value = KNOCK_GAIN * volume;
+    master.connect(ctx.destination);
+    master.connect(_reverbSend);
+    master.connect(_echoSend);
+
+    const osc = ctx.createOscillator(), og = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    og.gain.setValueAtTime(0, t);
+    og.gain.linearRampToValueAtTime(1, t + 0.002);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 0.028);
+    osc.connect(og); og.connect(master);
+    osc.start(t); osc.stop(t + 0.04);
+
+    const noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.02), ctx.sampleRate);
+    const nd = noiseBuf.getChannelData(0);
+    for (let i = 0; i < nd.length; i++) nd[i] = (Math.random() * 2 - 1) * (1 - i / nd.length);
+    const noise = ctx.createBufferSource(); noise.buffer = noiseBuf;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = freq; bp.Q.value = 3;
+    const ng = ctx.createGain(); ng.gain.value = 0.5;
+    noise.connect(bp); bp.connect(ng); ng.connect(master);
+    noise.start(t);
+  }
+  // ---------- action-movie dramatic drums + brass (destroyer's missile-strike theme) ----------
+  // Low taiko-style sub-bass thumps with a noise-crack attack, a bass brass stab on every 4th
+  // (accent) hit, and a sustained detuned-sawtooth low drone underneath -- all synthesized for
+  // the same licensing reason as the bell chime above. Tempo quickens the longer the roll
+  // agitates, so tension visibly rises the longer the dice tumble.
+  let _actionTimer = null, _actionT0 = 0, _actionHitCount = 0;
+  let _droneOsc1 = null, _droneOsc2 = null, _droneGain = null, _droneFilter = null;
+
+  function _playDrumHit(volume, accent) {
+    const ctx = _ensureAudio(); if (!ctx) return;
+    volume = (volume == null ? 1 : volume) * _masterVolume;
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(accent ? 150 : 110, t);
+    osc.frequency.exponentialRampToValueAtTime(accent ? 45 : 38, t + 0.16);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.9 * volume, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.001, t + (accent ? 0.5 : 0.32));
+    osc.connect(g); g.connect(ctx.destination); g.connect(_reverbSend);
+    osc.start(t); osc.stop(t + 0.55);
+
+    const noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.05), ctx.sampleRate);
+    const nd = noiseBuf.getChannelData(0);
+    for (let i = 0; i < nd.length; i++) nd[i] = (Math.random() * 2 - 1) * (1 - i / nd.length);
+    const noise = ctx.createBufferSource(); noise.buffer = noiseBuf;
+    const noiseFilter = ctx.createBiquadFilter();
+    noiseFilter.type = 'bandpass'; noiseFilter.frequency.value = accent ? 1400 : 900;
+    const noiseGain = ctx.createGain(); noiseGain.gain.value = 0.25 * volume;
+    noise.connect(noiseFilter); noiseFilter.connect(noiseGain);
+    noiseGain.connect(ctx.destination); noiseGain.connect(_reverbSend);
+    noise.start(t);
+
+    if (accent) {
+      [0, 4, -3].forEach(cents => {
+        const bo = ctx.createOscillator(), bg = ctx.createGain();
+        bo.type = 'sawtooth';
+        bo.frequency.value = 98;
+        bo.detune.value = cents;
+        bg.gain.setValueAtTime(0, t);
+        bg.gain.linearRampToValueAtTime(0.14 * volume, t + 0.05);
+        bg.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+        const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+        bo.connect(lp); lp.connect(bg);
+        bg.connect(ctx.destination); bg.connect(_reverbSend); bg.connect(_echoSend);
+        bo.start(t); bo.stop(t + 1.0);
+      });
+    }
+  }
+
+  function _startActionDrone() {
+    const ctx = _ensureAudio(); if (!ctx) return;
+    const t = ctx.currentTime;
+    _droneFilter = ctx.createBiquadFilter(); _droneFilter.type = 'lowpass'; _droneFilter.frequency.value = 500;
+    _droneGain = ctx.createGain();
+    _droneGain.gain.setValueAtTime(0, t);
+    _droneGain.gain.linearRampToValueAtTime(0.05, t + 0.6);
+    _droneFilter.connect(_droneGain);
+    _droneGain.connect(ctx.destination); _droneGain.connect(_reverbSend);
+    _droneOsc1 = ctx.createOscillator(); _droneOsc1.type = 'sawtooth'; _droneOsc1.frequency.value = 49;
+    _droneOsc2 = ctx.createOscillator(); _droneOsc2.type = 'sawtooth'; _droneOsc2.frequency.value = 49.4;
+    _droneOsc1.connect(_droneFilter); _droneOsc2.connect(_droneFilter);
+    _droneOsc1.start(t); _droneOsc2.start(t);
+  }
+
+  function _stopActionDrone() {
+    if (!_droneGain || !_actx) return;
+    const t = _actx.currentTime;
+    _droneGain.gain.cancelScheduledValues(t);
+    _droneGain.gain.setValueAtTime(_droneGain.gain.value, t);
+    _droneGain.gain.linearRampToValueAtTime(0, t + 0.4);
+    const o1 = _droneOsc1, o2 = _droneOsc2;
+    setTimeout(() => { try { o1.stop(); o2.stop(); } catch (e) {} }, 450);
+    _droneOsc1 = _droneOsc2 = _droneGain = _droneFilter = null;
+  }
+
+  function startActionHits() {
+    stopActionHits();
+    _actionT0 = performance.now();
+    _actionHitCount = 0;
+    _startActionDrone();
+    (function tick() {
+      const elapsed = (performance.now() - _actionT0) / 1000;
+      const interval = Math.max(190, 420 - elapsed * 60); // tempo quickens as tension rises
+      _actionHitCount++;
+      const accent = _actionHitCount % 4 === 0;
+      _playDrumHit(accent ? 1 : 0.7, accent);
+      _actionTimer = setTimeout(tick, interval);
+    })();
+  }
+
+  function stopActionHits() {
+    if (_actionTimer) { clearTimeout(_actionTimer); _actionTimer = null; }
+    _stopActionDrone();
+  }
+
+  function startTumbleNotes() {
+    stopTumbleNotes();
+    if (CFG.soundTheme === 'action') { startActionHits(); return; }
+    // Melody stays on its own fast tick -- needed to overlap into a legato singing texture,
+    // see the comment on playMelodyNote's decay lengthening. The knock no longer runs on a
+    // timer at all: Deck asked for it to be tied to real physics collisions instead of a
+    // guessed rhythm (dice-to-dice, to-wall, to-floor), so it's now driven directly by
+    // _checkCollisionsForKnock() in the main loop below, once per genuinely new contact.
+    // Interval *1.25, *2, *2, then *(2/3) (a 50% speed-up after three successive slow-downs) --
+    // net *3.333 on the original 22-52ms, matched by the same *3.333 on playMelodyNote's
+    // attack/decay so the legato overlap ratio stays the same regardless of the current pace.
+    (function melodyTick() {
+      playMelodyNote();
+      _noteTimer = setTimeout(melodyTick, 73.3 + Math.random() * 100);
+    })();
+  }
+  function stopTumbleNotes() {
+    if (_noteTimer) { clearTimeout(_noteTimer); _noteTimer = null; }
+    stopActionHits();
+  }
+
+  // ---------- seeded RNG (mulberry32) ----------
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---------- textures ----------
+  // Shared by faceTexture's procedural pip drawing AND faceNormalMap's dent generation, so a
+  // real (non-procedural) dice image's pips and the drilled-hole normal map laid on top of it
+  // line up -- both go through the exact same rotation logic (see applyPipBaseRotation /
+  // faceTexture's rotation param), so as long as this table's positions are used for both, the
+  // dent stays aligned with wherever the actual printed/photographed dot ends up.
+  const PIP_POS = {
+    1: [[.5, .5]],
+    2: [[.28, .28], [.72, .72]],
+    3: [[.25, .25], [.5, .5], [.75, .75]],
+    4: [[.28, .28], [.72, .28], [.28, .72], [.72, .72]],
+    5: [[.25, .25], [.75, .25], [.5, .5], [.25, .75], [.75, .75]],
+    6: [[.28, .22], [.72, .22], [.28, .5], [.72, .5], [.28, .78], [.72, .78]]
+  };
+  // Cache key is the actual image URL (or 'proc:<value>' for the generated pip faces),
+  // not the raw value -- two dice can show the same numeric value with entirely
+  // different art (e.g. destroyer's letter die vs number die), so keying on value
+  // alone would let one die's texture leak onto the other.
+  const TEX_CACHE = {};
+  function refreshClone(clone, base) {
+    clone.image = base.image;
+    clone.needsUpdate = true;
+  }
+  function faceTexture(value, imgMapOverride, rotation) {
+    rotation = rotation || 0;
+    const imgMap = imgMapOverride || CFG.faceImages;
+    if (imgMap && imgMap[value]) {
+      const url = imgMap[value];
+      const baseKey = url;
+      if (!TEX_CACHE[baseKey]) {
+        // Clones made before the image finishes loading never receive the pixels --
+        // TextureLoader mutates this texture's .image in place on load, it doesn't
+        // touch clones taken earlier -- so any rotated variant must be (re)cloned
+        // from the base only once the image is actually ready.
+        const base = new THREE.TextureLoader().load(url, () => {
+          for (const k in TEX_CACHE) {
+            if (k.startsWith(baseKey + ':')) refreshClone(TEX_CACHE[k], base);
+          }
+        });
+        base.anisotropy = 4;
+        TEX_CACHE[baseKey] = base;
+      }
+      if (!rotation) return TEX_CACHE[baseKey];
+      const rotKey = url + ':' + rotation;
+      if (TEX_CACHE[rotKey]) return TEX_CACHE[rotKey];
+      const base = TEX_CACHE[baseKey];
+      const rotTex = base.clone();
+      rotTex.center.set(0.5, 0.5);
+      rotTex.rotation = rotation;
+      if (base.image) rotTex.needsUpdate = true;
+      TEX_CACHE[rotKey] = rotTex;
+      return rotTex;
+    }
+    const cacheKey = 'proc:' + value + ':' + rotation;
+    if (TEX_CACHE[cacheKey]) return TEX_CACHE[cacheKey];
+    const S = 256, c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const bg = g.createRadialGradient(S / 2, S / 2, S * 0.2, S / 2, S / 2, S * 0.75);
+    bg.addColorStop(0, '#faf6ea');
+    bg.addColorStop(1, '#d9d2bd');
+    g.fillStyle = bg;
+    g.fillRect(0, 0, S, S);
+    if (rotation) { g.translate(S / 2, S / 2); g.rotate(rotation); g.translate(-S / 2, -S / 2); }
+    const pos = PIP_POS[value];
+    // Flat fill, no baked-in highlight gradient -- faceNormalMap now supplies a real concave
+    // dent that responds to actual scene lighting; a static painted highlight here would fight
+    // it (a fixed offset "shine" reads as a convex glued-on ball no matter which way the real
+    // light comes from) instead of reinforcing it.
+    g.fillStyle = '#141414';
+    for (const [x, y] of pos) {
+      const px = x * S, py = y * S, r = S * 0.085;
+      g.beginPath(); g.arc(px, py, r, 0, Math.PI * 2); g.fill();
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.anisotropy = 4;
+    TEX_CACHE[cacheKey] = tex;
+    return tex;
+  }
+
+  // Drilled-hole normal map for a face's pips, so the "dots" read as actual concave dimples
+  // under the cloche's lighting instead of flat printed circles -- independent of whether the
+  // color comes from a real photo (Craps/Sic-Bo's DIE_B64/webp art) or the procedural canvas
+  // above, since it's generated purely from PIP_POS + the same rotation both maps share.
+  // Built from an explicit height field (not a hand-derived sphere-normal formula) because a
+  // numeric finite-difference gradient is much harder to get subtly wrong than trigonometry:
+  // the height profile (cos(pi*t)+1)/2 for t=dist/radius has zero slope at both the pip's
+  // center AND its rim by construction, so the dent blends into the flat surrounding surface
+  // with no visible seam, and centered numerical derivatives just fall out of that array.
+  const NORMAL_CACHE = {};
+  function faceNormalMap(value, rotation) {
+    rotation = rotation || 0;
+    const cacheKey = 'dent:' + value + ':' + rotation;
+    if (NORMAL_CACHE[cacheKey]) return NORMAL_CACHE[cacheKey];
+    const S = 256;
+    const height = new Float32Array(S * S);
+    const cosR = Math.cos(-rotation), sinR = Math.sin(-rotation);
+    const cx0 = S / 2, cy0 = S / 2;
+    const pipR = S * 0.085, depth = 2.75;
+    const pos = PIP_POS[value];
+    for (let py = 0; py < S; py++) {
+      for (let px = 0; px < S; px++) {
+        // undo the same canvas rotation faceTexture applies, so this height field lines up
+        // with PIP_POS's un-rotated coordinates exactly like the rotated color texture does
+        const ux = px - cx0, uy = py - cy0;
+        const rx = ux * cosR - uy * sinR + cx0, ry = ux * sinR + uy * cosR + cy0;
+        let h = 0;
+        for (const [x, y] of pos) {
+          const dx = rx - x * S, dy = ry - y * S;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < pipR) h = Math.min(h, -depth * (Math.cos(Math.PI * d / pipR) + 1) / 2);
+        }
+        height[py * S + px] = h;
+      }
+    }
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const img = g.createImageData(S, S);
+    for (let py = 0; py < S; py++) {
+      for (let px = 0; px < S; px++) {
+        const xL = height[py * S + Math.max(0, px - 1)], xR = height[py * S + Math.min(S - 1, px + 1)];
+        const yU = height[Math.max(0, py - 1) * S + px], yD = height[Math.min(S - 1, py + 1) * S + px];
+        let nx = (xR - xL), ny = (yD - yU), nz = 1;
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        nx /= len; ny /= len; nz /= len;
+        const idx = (py * S + px) * 4;
+        img.data[idx] = (nx * 0.5 + 0.5) * 255;
+        img.data[idx + 1] = (ny * 0.5 + 0.5) * 255;
+        img.data[idx + 2] = (nz * 0.5 + 0.5) * 255;
+        img.data[idx + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(c);
+    tex.anisotropy = 4;
+    NORMAL_CACHE[cacheKey] = tex;
+    return tex;
+  }
+
+  // ---------- geometry ----------
+  // A single shared radius for both edges and corners -- independent edge/corner radii were
+  // tried (smaller edge radius, larger corner radius, even with a smooth blend between them)
+  // and consistently rendered as a sharp spike poking out of each corner rather than a smooth
+  // dome, because a rounded box is only seam-free when the corner sphere's radius matches the
+  // edge arcs it connects to; anything larger necessarily bulges past them. One radius keeps
+  // it artifact-free -- corners still read as more dramatically rounded than edges on their
+  // own, since they curve in three directions at once vs. an edge's simple 2D arc.
+  function roundedBoxGeometry(size, radius, seg) {
+    const geo = new THREE.BoxGeometry(size, size, size, seg, seg, seg);
+    const posA = geo.attributes.position;
+    const half = size / 2 - radius;
+    const v = new THREE.Vector3();
+    // Analytical normals instead of computeVertexNormals(): a face-interior vertex only ever
+    // gets pushed along ONE axis (straight out to the flat face plane, dx=dy=0), so its true
+    // normal is the exact axis direction (0,0,1) etc, not an average with its rounded-corner
+    // neighbors. computeVertexNormals() blends across that boundary regardless, which is what
+    // was making the flat faces look subtly bulged even though their vertex positions were
+    // already flat -- the smoothing was happening in the shading, not the geometry. Using the
+    // same (dx,dy,dz) push direction as the normal keeps every flat-face vertex's normal
+    // uniformly perpendicular (dead-flat shading) and only lets the actual rounded band curve.
+    const normals = new Float32Array(posA.count * 3);
+    for (let i = 0; i < posA.count; i++) {
+      v.fromBufferAttribute(posA, i);
+      const cx = Math.max(-half, Math.min(half, v.x));
+      const cy = Math.max(-half, Math.min(half, v.y));
+      const cz = Math.max(-half, Math.min(half, v.z));
+      let dx = v.x - cx, dy = v.y - cy, dz = v.z - cz;
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (len > 0) {
+        const inv = 1 / len;
+        normals[i * 3] = dx * inv; normals[i * 3 + 1] = dy * inv; normals[i * 3 + 2] = dz * inv;
+        const k = radius / len; dx *= k; dy *= k; dz *= k;
+      }
+      posA.setXYZ(i, cx + dx, cy + dy, cz + dz);
+    }
+    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    return geo;
+  }
+
+  // ---------- overlay DOM ----------
+  function buildOverlay() {
+    const style = document.createElement('style');
+    style.textContent = [
+      '.cdx-overlay{position:fixed;inset:0;display:none;align-items:center;',
+      'justify-content:center;flex-direction:column;background:rgba(5,10,8,0.82);',
+      'z-index:' + CFG.zIndex + ';opacity:0;transition:opacity 240ms ease;}',
+      '.cdx-overlay.cdx-open{display:flex;}',
+      '.cdx-overlay.cdx-visible{opacity:1;}',
+      '.cdx-stage{width:min(640px,92vw);height:min(520px,70vh);}',
+      '.cdx-label{color:#c9a24b;font-family:Georgia,serif;font-size:15px;',
+      'letter-spacing:0.2em;text-transform:uppercase;margin-top:6px;',
+      'min-height:20px;text-align:center;}'
+    ].join('');
+    document.head.appendChild(style);
+
+    overlayEl = document.createElement('div');
+    overlayEl.className = 'cdx-overlay';
+    stageEl = document.createElement('div');
+    stageEl.className = 'cdx-stage';
+    labelEl = document.createElement('div');
+    labelEl.className = 'cdx-label';
+    overlayEl.appendChild(stageEl);
+    overlayEl.appendChild(labelEl);
+    document.body.appendChild(overlayEl);
+  }
+
+  function showOverlay() {
+    overlayEl.classList.add('cdx-open');
+    renderer.setSize(stageEl.clientWidth, stageEl.clientHeight);
+    camera.aspect = stageEl.clientWidth / stageEl.clientHeight;
+    camera.updateProjectionMatrix();
+    requestAnimationFrame(() => overlayEl.classList.add('cdx-visible'));
+  }
+
+  function hideOverlay() {
+    overlayEl.classList.remove('cdx-visible');
+    setTimeout(() => overlayEl.classList.remove('cdx-open'), 260);
+  }
+
+  // ---------- scene ----------
+  function buildScene() {
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    stageEl.appendChild(renderer.domElement);
+
+    scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x0a0f0d, 24, 40);
+
+    camera = new THREE.PerspectiveCamera(42, 1.2, 0.1, 100);
+    camera.position.set(0, 8.5, 12.5);
+    camera.lookAt(0, 2.6, 0);
+
+    scene.add(new THREE.AmbientLight(0x8a94a0, 0.45));
+    const key = new THREE.DirectionalLight(0xfff2d9, 1.1);
+    key.position.set(6, 14, 8);
+    key.castShadow = true;
+    key.shadow.mapSize.set(1024, 1024);
+    key.shadow.camera.left = -7; key.shadow.camera.right = 7;
+    key.shadow.camera.top = 7; key.shadow.camera.bottom = -7;
+    scene.add(key);
+    const rim = new THREE.DirectionalLight(0x6fa8ff, 0.5);
+    rim.position.set(-8, 6, -6);
+    scene.add(rim);
+
+    world = new CANNON.World();
+    world.gravity.set(0, CFG.gravity, 0);
+    world.broadphase = new CANNON.NaiveBroadphase();
+    world.solver.iterations = 14;
+
+    matDie = new CANNON.Material('die');
+    matSurface = new CANNON.Material('surface'); // felt floor only -- unchanged, dice still settle normally here
+    matGlass = new CANNON.Material('glass'); // cloche walls + ceiling -- lower friction so dice don't stick to the glass
+    world.addContactMaterial(new CANNON.ContactMaterial(matDie, matSurface, {
+      friction: 0.11, restitution: 0.42
+    }));
+    world.addContactMaterial(new CANNON.ContactMaterial(matDie, matGlass, {
+      friction: 0.04, restitution: 0.45
+    }));
+    world.addContactMaterial(new CANNON.ContactMaterial(matDie, matDie, {
+      friction: 0.01, restitution: 0.48
+    }));
+    // Brick gives a real rebound, but restrained: at 0.62 the dice pinballed between the wall
+    // and the front stop long enough to hit maxResolveSteps, which the live replay plays back at
+    // real time -- a ~20s roll. 0.45 still visibly bounces them off the brick and bleeds off in
+    // about a second. Friction is well above the glass so they bite and tumble, not skate.
+    matBrick = new CANNON.Material('brick');
+    world.addContactMaterial(new CANNON.ContactMaterial(matDie, matBrick, {
+      friction: 0.25, restitution: 0.45
+    }));
+    // Asphalt is its own surface rather than reusing the cloche's felt: it needs noticeably more
+    // friction and less bounce to kill a thrown die's momentum in a believable distance, and
+    // matSurface's numbers are tuned for dice dropping nearly straight down inside the jar.
+    matAsphalt = new CANNON.Material('asphalt');
+    world.addContactMaterial(new CANNON.ContactMaterial(matDie, matAsphalt, {
+      friction: 0.34, restitution: 0.26
+    }));
+    world.defaultContactMaterial.friction = 0.2;
+    world.defaultContactMaterial.restitution = 0.4;
+
+    // Street Craps throws at a wall instead of shaking under a bell jar. Early return so the
+    // entire cloche build below is left exactly as it was for every other game.
+    if (isWall()) { buildWallArena(); return; }
+
+    const R = CFG.clocheRadius, H = CFG.clocheHeight;
+
+    // Real wood-grain / felt photo textures (cloche_wood.webp, cloche_felt.webp) rather than
+    // flat colors -- tiled with RepeatWrapping since both source images are seamless.
+    const woodTex = new THREE.TextureLoader().load('cloche_wood.webp');
+    woodTex.wrapS = woodTex.wrapT = THREE.RepeatWrapping;
+    woodTex.repeat.set(3, 1);
+    woodTex.anisotropy = 4;
+
+    const pedestal = new THREE.Mesh(
+      new THREE.CylinderGeometry(R + 1.1, R + 1.5, 1.2, 48),
+      new THREE.MeshStandardMaterial({ map: woodTex, roughness: 0.55, metalness: 0.08 }));
+    pedestal.position.y = -0.65;
+    pedestal.receiveShadow = true;
+    scene.add(pedestal);
+
+    // static plane floor: cannot be tunneled
+    const floor = new CANNON.Body({ mass: 0, material: matSurface });
+    floor.addShape(new CANNON.Plane());
+    floor.position.set(0, PLATFORM_Y, 0);
+    floor.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+    world.addBody(floor);
+
+    const feltTex = new THREE.TextureLoader().load('cloche_felt.webp');
+    feltTex.wrapS = feltTex.wrapT = THREE.RepeatWrapping;
+    feltTex.repeat.set(2, 2);
+    feltTex.anisotropy = 4;
+
+    platformMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(R + 0.15, R + 0.15, 0.7, 48),
+      new THREE.MeshStandardMaterial({ map: feltTex, roughness: 0.95 }));
+    platformMesh.receiveShadow = true;
+    scene.add(platformMesh);
+
+    const segs = CFG.wallSegments;
+    for (let i = 0; i < segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      const wall = new CANNON.Body({ mass: 0, material: matGlass });
+      const halfW = (Math.PI * R / segs) * 1.25;
+      wall.addShape(new CANNON.Box(new CANNON.Vec3(halfW, H / 2 + 2, 0.35)));
+      wall.position.set(Math.sin(a) * (R + 0.33), H / 2, Math.cos(a) * (R + 0.33));
+      wall.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), a);
+      world.addBody(wall);
+    }
+    const ceiling = new CANNON.Body({ mass: 0, material: matGlass });
+    ceiling.addShape(new CANNON.Plane());
+    ceiling.position.set(0, H + 1.2, 0);
+    ceiling.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 2);
+    world.addBody(ceiling);
+
+    const clocheGroup = new THREE.Group();
+    const glass = new THREE.MeshPhysicalMaterial({
+      color: 0xcfe8ef, transparent: true, opacity: 0.13,
+      roughness: 0.05, metalness: 0, side: THREE.DoubleSide,
+      clearcoat: 1, clearcoatRoughness: 0.1, depthWrite: false
+    });
+    const tube = new THREE.Mesh(
+      new THREE.CylinderGeometry(R + 0.45, R + 0.45, H, 64, 1, true), glass);
+    tube.position.y = H / 2 + 0.35;
+    clocheGroup.add(tube);
+    const dome = new THREE.Mesh(
+      new THREE.SphereGeometry(R + 0.45, 64, 24, 0, Math.PI * 2, 0, Math.PI / 2), glass);
+    dome.position.y = H + 0.35;
+    clocheGroup.add(dome);
+    const knob = new THREE.Mesh(
+      new THREE.SphereGeometry(0.38, 24, 16),
+      new THREE.MeshStandardMaterial({ color: 0xc9a24b, roughness: 0.3, metalness: 0.9 }));
+    knob.position.y = H + R + 0.72;
+    clocheGroup.add(knob);
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(R + 0.45, 0.09, 12, 64),
+      new THREE.MeshStandardMaterial({ color: 0xc9a24b, roughness: 0.35, metalness: 0.85 }));
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = 0.42;
+    clocheGroup.add(ring);
+    scene.add(clocheGroup);
+  }
+
+  // ---------- wall arena build ----------
+  // Physics is four static boxes (back wall + two sides + a front stop) plus a ground plane and
+  // a high ceiling. Only the back wall and the ground are drawn; the rest are invisible bounds
+  // that exist purely so a hot throw can't leave the playfield. Same PLATFORM_Y as the cloche,
+  // so resetDicePositions()/clampDice()'s floor math is shared.
+  function buildWallArena() {
+    const A = ARENA;
+
+    const ground = new CANNON.Body({ mass: 0, material: matAsphalt });
+    ground.addShape(new CANNON.Plane());
+    ground.position.set(0, PLATFORM_Y, 0);
+    ground.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+    world.addBody(ground);
+
+    const groundMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(A.halfW * 2 + 6, A.frontZ - A.wallZ + 6),
+      new THREE.MeshStandardMaterial({ map: asphaltTexture(), roughness: 0.98, metalness: 0 }));
+    groundMesh.rotation.x = -Math.PI / 2;
+    groundMesh.position.set(0, PLATFORM_Y + 0.001, (A.frontZ + A.wallZ) / 2);
+    groundMesh.receiveShadow = true;
+    scene.add(groundMesh);
+    platformMesh = groundMesh;  // reused by the same show/hide paths the cloche platform uses
+
+    // Back wall: the thing you actually throw at.
+    const wallBody = new CANNON.Body({ mass: 0, material: matBrick });
+    wallBody.addShape(new CANNON.Box(new CANNON.Vec3(A.halfW + 2, A.height, 0.4)));
+    wallBody.position.set(0, PLATFORM_Y + A.height, A.wallZ - 0.4);
+    world.addBody(wallBody);
+
+    const wallMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(A.halfW * 2 + 4, A.height * 2, 0.8),
+      new THREE.MeshStandardMaterial({ map: brickTexture(), roughness: 0.92, metalness: 0.02 }));
+    wallMesh.position.set(0, PLATFORM_Y + A.height, A.wallZ - 0.4);
+    wallMesh.receiveShadow = true;
+    wallMesh.castShadow = true;
+    scene.add(wallMesh);
+
+    // A dark strip where wall meets ground -- grounds the wall instead of letting it float.
+    const skirt = new THREE.Mesh(
+      new THREE.PlaneGeometry(A.halfW * 2 + 4, 1.2),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55 }));
+    skirt.rotation.x = -Math.PI / 2;
+    skirt.position.set(0, PLATFORM_Y + 0.01, A.wallZ + 0.6);
+    scene.add(skirt);
+
+    // Invisible bounds: sides, a front stop, and a ceiling.
+    const bound = (hx, hy, hz, x, y, z) => {
+      const b = new CANNON.Body({ mass: 0, material: matGlass });
+      b.addShape(new CANNON.Box(new CANNON.Vec3(hx, hy, hz)));
+      b.position.set(x, y, z);
+      world.addBody(b);
+    };
+    const midZ = (A.frontZ + A.wallZ) / 2, depth = (A.frontZ - A.wallZ) / 2 + 1;
+    bound(0.4, A.height, depth, -A.halfW - 0.4, PLATFORM_Y + A.height, midZ);
+    bound(0.4, A.height, depth,  A.halfW + 0.4, PLATFORM_Y + A.height, midZ);
+    bound(A.halfW + 1, A.height, 0.4, 0, PLATFORM_Y + A.height, A.frontZ + 0.4);
+
+    const ceil = new CANNON.Body({ mass: 0, material: matGlass });
+    ceil.addShape(new CANNON.Plane());
+    ceil.position.set(0, PLATFORM_Y + A.height * 1.8, 0);
+    ceil.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 2);
+    world.addBody(ceil);
+  }
+
+  function buildDice(n) {
+    for (const d of dice) { scene.remove(d.mesh); world.remove(d.body); }
+    dice = [];
+    const s = CFG.dieSize;
+    const edgeR = s * 0.24;
+
+    for (let i = 0; i < n; i++) {
+      const imgMap = (CFG.faceImagesPerDie && CFG.faceImagesPerDie[i]) || CFG.faceImages;
+      const faceValues = DEFAULT_FACE_VALUES.slice();
+      const initRot = pipRotationsForValues(faceValues);
+      // alphaTest (not a plain color tint -- that multiplies the whole texture including
+      // the visible icon, which would blacken it out entirely) discards fully-transparent
+      // pixels in the face art instead of rendering their raw, un-premultiplied RGB as
+      // opaque white. Those discarded corner pixels then show whatever's behind the die
+      // (the dark backdrop), instead of a stray white bleed on the curved/beveled edges.
+      const mats = faceValues.map((v, i) => new THREE.MeshStandardMaterial({
+        map: faceTexture(v, imgMap, initRot.tex[i]),
+        normalMap: CFG.pipDepressions ? faceNormalMap(v, initRot.geo[i]) : null,
+        normalScale: new THREE.Vector2(1, 1), alphaTest: 0.5, roughness: 0.4, metalness: 0.05
+      }));
+      // seg bumped 4 -> 10: the flat-face region only spans size-2*radius out of the full
+      // face, so at seg=4 very few of a face's own grid lines actually land in the truly-flat
+      // zone -- most of the visible curve near an edge was being drawn with just one or two
+      // polygons, which reads as faceted/sharp rather than smoothly rounded. More segments
+      // gives the rounded band enough polygons to look smooth without changing edgeR itself.
+      const mesh = new THREE.Mesh(roundedBoxGeometry(s, edgeR, 14), mats);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+
+      const body = new CANNON.Body({ mass: 1, material: matDie });
+      const h = s / 2 * 0.95;
+      body.addShape(new CANNON.Box(new CANNON.Vec3(h, h, h)));
+      // The alley needs more drag than the jar: a thrown die covers real distance and has to
+      // come to rest in a believable stretch of ground rather than skidding the full length.
+      body.linearDamping = isWall() ? 0.22 : 0.12;
+      body.angularDamping = isWall() ? 0.26 : 0.12;
+      body.allowSleep = false;
+      world.addBody(body);
+
+      dice.push({ mesh, body, faceValues, imgMap, nextPopStep: 0 });
+    }
+    resetDicePositions();
+  }
+
+  function resetDicePositions() {
+    const s = CFG.dieSize, n = dice.length;
+    // Wall arena: dice start at the near edge, in the shooter's hand, spread across the width --
+    // they get thrown AT the wall, so they can't start in a ring around the middle like the
+    // cloche's shake-in-place layout.
+    if (isWall()) {
+      for (let i = 0; i < n; i++) {
+        const d = dice[i];
+        const spread = n > 1 ? (i / (n - 1) - 0.5) * s * 1.6 : 0;
+        // Hand height, not resting on the ground. The dice are held and thrown, so they have to
+        // start high enough that a flat throw reaches the brick before gravity drops them onto
+        // the asphalt -- see the trajectory note on the launch impulse.
+        d.holdPos = { x: spread, y: ARENA.handY + i * 0.05, z: ARENA.frontZ - s };
+        d.body.position.set(d.holdPos.x, d.holdPos.y, d.holdPos.z);
+        d.body.velocity.set(0, 0, 0);
+        d.body.angularVelocity.set(0, 0, 0);
+        d.body.quaternion.setFromEuler(
+          Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      }
+      return;
+    }
+    for (let i = 0; i < n; i++) {
+      const d = dice[i];
+      const a = (i / n) * Math.PI * 2;
+      const r = Math.min(1.3, CFG.clocheRadius - s);
+      d.body.position.set(Math.sin(a) * r, PLATFORM_Y + s / 2 + 0.02 + i * 0.01, Math.cos(a) * r);
+      d.body.velocity.set(0, 0, 0);
+      d.body.angularVelocity.set(0, 0, 0);
+      d.body.quaternion.setFromEuler(
+        Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+    }
+  }
+
+  // ---------- face reading and relabeling ----------
+  function naturalUpFace(d) {
+    const up = new CANNON.Vec3(0, 1, 0);
+    let best = -2, idx = 0;
+    for (let i = 0; i < 6; i++) {
+      const worldN = d.body.quaternion.vmult(FACE_NORMALS[i]);
+      const dot = worldN.dot(up);
+      if (dot > best) { best = dot; idx = i; }
+    }
+    return { idx, confidence: best };
+  }
+
+  function relabelDie(d, upFaceIdx, targetValue) {
+    const values = new Array(6);
+    values[upFaceIdx] = targetValue;
+    values[upFaceIdx ^ 1] = 7 - targetValue;
+    const used = new Set([targetValue, 7 - targetValue]);
+    // low halves of the two unused value pairs
+    const lows = [1, 2, 3].filter(v => !used.has(v) && !used.has(7 - v));
+    // the two face pairs not containing the up face
+    const pairIdx = [[0, 1], [2, 3], [4, 5]]
+      .filter(p => p[0] !== upFaceIdx && p[1] !== upFaceIdx);
+    for (let k = 0; k < pairIdx.length; k++) {
+      values[pairIdx[k][0]] = lows[k];
+      values[pairIdx[k][1]] = 7 - lows[k];
+    }
+    d.faceValues = values;
+    const rot = pipRotationsForValues(values);
+    for (let i = 0; i < 6; i++) {
+      d.mesh.material[i].map = faceTexture(values[i], d.imgMap, rot.tex[i]);
+      d.mesh.material[i].normalMap = CFG.pipDepressions ? faceNormalMap(values[i], rot.geo[i]) : null;
+      d.mesh.material[i].needsUpdate = true;
+    }
+  }
+
+  // ---------- physics state snapshot ----------
+  function snapshot() {
+    return dice.map(d => ({
+      p: d.body.position.clone(),
+      q: d.body.quaternion.clone(),
+      v: d.body.velocity.clone(),
+      w: d.body.angularVelocity.clone()
+    }));
+  }
+
+  function restore(snap) {
+    for (let i = 0; i < dice.length; i++) {
+      const d = dice[i], s = snap[i];
+      d.body.position.copy(s.p);
+      d.body.quaternion.copy(s.q);
+      d.body.velocity.copy(s.v);
+      d.body.angularVelocity.copy(s.w);
+      d.body.force.set(0, 0, 0);
+      d.body.torque.set(0, 0, 0);
+    }
+  }
+
+  function clampDice() {
+    const s = CFG.dieSize, R = CFG.clocheRadius;
+    for (const d of dice) {
+      const p = d.body.position;
+      if (p.y < PLATFORM_Y + s * 0.25) {
+        p.y = PLATFORM_Y + s * 0.5;
+        if (d.body.velocity.y < 0) d.body.velocity.y = 0;
+      }
+      // The cloche's clamp is radial (round jar). The alley is a rectangle, so clamping by
+      // radius there would haul dice back toward the middle of the floor and fight the throw.
+      if (isWall()) {
+        const A = ARENA, m = s * 0.4;
+        const maxX = A.halfW - m;
+        if (p.x >  maxX) { p.x =  maxX; if (d.body.velocity.x > 0) d.body.velocity.x *= -0.3; }
+        if (p.x < -maxX) { p.x = -maxX; if (d.body.velocity.x < 0) d.body.velocity.x *= -0.3; }
+        const minZ = A.wallZ + m, maxZ = A.frontZ - m;
+        if (p.z < minZ) { p.z = minZ; if (d.body.velocity.z < 0) d.body.velocity.z *= -0.3; }
+        if (p.z > maxZ) { p.z = maxZ; if (d.body.velocity.z > 0) d.body.velocity.z *= -0.3; }
+        continue;
+      }
+      const horiz = Math.sqrt(p.x * p.x + p.z * p.z);
+      const maxR = R - s * 0.4;
+      if (horiz > maxR) { const k = maxR / horiz; p.x *= k; p.z *= k; }
+    }
+  }
+
+  // ---------- deterministic resolve plan ----------
+  // one function drives both the silent pre-simulation and the live
+  // replay. all randomness comes from ctx.rng and all timing from
+  // ctx.step, so the two runs are identical on the same machine.
+  function makeResolveCtx(rng) {
+    return { rng, step: 0, hold: 0, done: false, correcting: false,
+             popSteps: dice.map(() => 0) };
+  }
+
+  function resolveStep(ctx) {
+    const rng = ctx.rng;
+    if (ctx.step === 0) {
+      for (const d of dice) {
+        if (isWall()) {
+          // A throw, not a shake: dominant velocity is straight down the alley at the wall
+          // (-z), with only a little lift and lateral scatter so the dice actually reach the
+          // brick and rebound rather than dying on the floor halfway there. All randomness
+          // still comes from ctx.rng, so the pre-simulation and the live replay stay identical
+          // -- the same determinism contract the cloche has.
+          // The brick must be the FIRST thing they hit, not a floor bounce on the way there.
+          // Trajectory, checked rather than eyeballed: released at y=4.6, z=5.5, wall face at
+          // z=-5.5, so 11 units to cover. At vz=-24 that's t=0.46s; with vy=+4 and gravity -34,
+          // y(0.46) = 4.6 + 1.84 - 3.57 = 2.87, and a die's half-height is 1.0, so its underside
+          // is still ~1.5 above the asphalt when it reaches the wall. Flat and fast, i.e. thrown
+          // rather than lobbed. The rebound plus the drop is then the second collision.
+          d.body.velocity.set(
+            (rng() - 0.5) * 2.5,
+            3 + rng() * 2,
+            -(22 + rng() * 4));
+          // Heavy tumble about the throw axis, which is what a real thrown die does.
+          d.body.angularVelocity.set(
+            (rng() - 0.5) * 22, (rng() - 0.5) * 16, (rng() - 0.5) * 22);
+        } else {
+          d.body.velocity.set(
+            (rng() - 0.5) * 5,
+            9 + rng() * 5,
+            (rng() - 0.5) * 5);
+          d.body.angularVelocity.set(
+            (rng() - 0.5) * 20, (rng() - 0.5) * 20, (rng() - 0.5) * 20);
+        }
+      }
+    }
+
+    world.step(STEP);
+    clampDice();
+    ctx.step++;
+
+    let allStill = true, allFlat = true;
+    for (const d of dice) {
+      if (d.body.velocity.norm() > CFG.settleSpeed ||
+          d.body.angularVelocity.norm() > CFG.settleSpeed) allStill = false;
+      if (naturalUpFace(d).confidence < CFG.flatThreshold) allFlat = false;
+    }
+
+    if (allStill && allFlat) {
+      ctx.correcting = false;
+      ctx.hold++;
+      if (ctx.hold >= CFG.holdSteps) ctx.done = true;
+      return;
+    }
+    ctx.hold = 0;
+
+    if (allStill && !allFlat) {
+      ctx.correcting = true;
+      for (let i = 0; i < dice.length; i++) {
+        const d = dice[i];
+        if (naturalUpFace(d).confidence >= CFG.flatThreshold) continue;
+        if (d.body.position.y >= PLATFORM_Y + CFG.dieSize * 1.5) continue;
+        d.body.velocity.x += (rng() - 0.5) * 1.2;
+        d.body.velocity.z += (rng() - 0.5) * 1.2;
+        d.body.velocity.y += rng() * 0.9;
+        d.body.angularVelocity.x += (rng() - 0.5) * 5;
+        d.body.angularVelocity.z += (rng() - 0.5) * 5;
+        if (ctx.step >= ctx.popSteps[i]) {
+          ctx.popSteps[i] = ctx.step + 84 + Math.floor(rng() * 60);
+          d.body.velocity.y = 4.5;
+          d.body.angularVelocity.set(
+            (rng() - 0.5) * 9, (rng() - 0.5) * 9, (rng() - 0.5) * 9);
+        }
+      }
+    } else {
+      ctx.correcting = false;
+    }
+  }
+
+  // silent pre-simulation: returns natural up-face indices or null
+  function presimulate(seed) {
+    const ctx = makeResolveCtx(mulberry32(seed));
+    while (!ctx.done && ctx.step < CFG.maxResolveSteps) resolveStep(ctx);
+    if (!ctx.done) return null;
+    return dice.map(d => naturalUpFace(d).idx);
+  }
+
+  // ---------- roll orchestration ----------
+  function beginResolve() {
+    const snap = snapshot();
+    let chosenSeed = null, upFaces = null;
+
+    const baseSeed = (Math.random() * 0xFFFFFFFF) >>> 0;
+    for (let attempt = 0; attempt < CFG.presimAttempts; attempt++) {
+      const seed = (baseSeed + attempt * 7919) >>> 0;
+      restore(snap);
+      const faces = presimulate(seed);
+      if (faces) { chosenSeed = seed; upFaces = faces; break; }
+    }
+
+    restore(snap);
+
+    if (chosenSeed !== null) {
+      // relabel so the natural landing face shows the server value
+      for (let i = 0; i < dice.length; i++) {
+        relabelDie(dice[i], upFaces[i], serverValues[i]);
+      }
+      resolveCtx = makeResolveCtx(mulberry32(chosenSeed));
+      resolveCtx.expectedFaces = upFaces;
+      resolveCtx.fallback = false;
+    } else {
+      // pre-sim never settled within the cap: run live and relabel at rest
+      resolveCtx = makeResolveCtx(mulberry32((Math.random() * 0xFFFFFFFF) >>> 0));
+      resolveCtx.fallback = true;
+    }
+    stepDebt = 0;
+    phase = 'resolving';
+    labelEl.textContent = '';
+  }
+
+  function finishResolve(now) {
+    // verify, and repair if the live run diverged from the pre-sim
+    for (let i = 0; i < dice.length; i++) {
+      const face = naturalUpFace(dice[i]).idx;
+      if (dice[i].faceValues[face] !== serverValues[i]) {
+        relabelDie(dice[i], face, serverValues[i]);
+      }
+    }
+    const values = serverValues.slice();
+    const payload = {
+      values,
+      total: values.reduce((a, b) => a + b, 0),
+      forced: true,
+      timeMs: Math.round(now - rollT0)
+    };
+    phase = 'reveal';
+    stopTumbleNotes();
+    setTimeout(() => {
+      hideOverlay();
+      phase = 'idle';
+      serverValues = null;
+      const done = activeResolve; activeResolve = null; activeReject = null;
+      for (const fn of resultCallbacks) { try { fn(payload); } catch (e) { console.error(e); } }
+      document.dispatchEvent(new CustomEvent('dice-result', { detail: payload }));
+      if (done) done(payload);
+    }, CFG.revealHoldMs);
+  }
+
+  // Deck: tie the knock sound to real physics collisions (dice-to-dice, to-wall, to-floor)
+  // instead of a random timer. world.contacts holds every ContactEquation active as of the
+  // world.step() that just ran; every contact necessarily involves at least one die (the
+  // floor/walls/ceiling are all static mass-0 bodies, so they can never collide with each
+  // other). Comparing this step's touching pairs against last step's picks out only NEW
+  // contacts -- a die resting/sliding in continuous contact keeps re-appearing in
+  // world.contacts every step but is NOT a new collision, so it's skipped. Impact velocity
+  // along the contact normal is thresholded so a die settling gently doesn't trigger a knock;
+  // harder hits also play a bit louder (capped) for some dynamic realism.
+  //
+  // Only called from the live preroll/resolving stepping in loop() below -- NOT from
+  // presimulate()'s silent search (which reuses the same resolveStep() but runs synchronously,
+  // invisibly, discarded and re-run per attempt -- it must never make sound).
+  const KNOCK_IMPACT_MIN = 1.2; // m/s along the contact normal; below this reads as a gentle settle
+  function _checkCollisionsForKnock() {
+    const nextPairs = new Set();
+    for (const c of world.contacts) {
+      const key = c.bi.id < c.bj.id ? (c.bi.id + '_' + c.bj.id) : (c.bj.id + '_' + c.bi.id);
+      nextPairs.add(key);
+      if (_touchingPairs.has(key)) continue; // still touching from last step -- not a new hit
+      const impact = Math.abs(c.getImpactVelocityAlongNormal ? c.getImpactVelocityAlongNormal() : 0);
+      if (impact >= KNOCK_IMPACT_MIN) playKnockSound(Math.min(1, impact / 6));
+    }
+    _touchingPairs = nextPairs;
+  }
+
+  // ---------- main loop ----------
+  function loop(now) {
+    rafId = requestAnimationFrame(loop);
+    const dt = Math.min((now - lastTime) / 1000, 1 / 20);
+    lastTime = now;
+    if (dt <= 0 || phase === 'idle') { renderIfOpen(); return; }
+
+    if (phase === 'preroll') {
+      // free-running agitation, wall clock driven, outcome irrelevant
+      const t = (now - prerollT0) / 1000;
+      const inBuzz = (now - prerollT0) < CFG.buzzMs;
+
+      // The alley has no agitation phase at all. The cloche shakes its platform and pops the
+      // dice around on it while waiting for the server -- that IS the bell jar, and doing it
+      // here made the asphalt visibly vibrate and the dice skitter on the ground, i.e. exactly
+      // the "wall-shaped bubble craps" this arena exists to not be. Instead the dice are simply
+      // held at hand height, turning over in the shooter's fist, and thrown when the server
+      // answers. The ground never moves: it's the ground.
+      if (isWall()) {
+        for (const d of dice) {
+          if (!d.holdPos) continue;
+          d.body.position.set(d.holdPos.x, d.holdPos.y, d.holdPos.z);
+          d.body.velocity.set(0, 0, 0);
+          // Slow turn-over in the hand, so the dice read as held rather than frozen.
+          d.body.angularVelocity.set(2.2, 3.0, 1.6);
+        }
+        world.step(STEP, dt, 6);
+        const minDoneW = now - prerollT0 >= CFG.minAgitateMs;
+        if (minDoneW && serverValues) beginResolve();
+        renderIfOpen();
+        return;
+      }
+
+      platformMesh.position.y =
+        Math.sin(t * 55) * 0.04 + Math.sin(t * 23 + 1.3) * 0.025;
+
+      for (const d of dice) {
+        if (d.body.position.y < PLATFORM_Y + CFG.dieSize * 1.5) {
+          d.body.velocity.x += (Math.random() - 0.5) * 1.6;
+          d.body.velocity.z += (Math.random() - 0.5) * 1.6;
+          d.body.velocity.y += Math.random() * 1.2;
+          d.body.angularVelocity.x += (Math.random() - 0.5) * 6;
+          d.body.angularVelocity.y += (Math.random() - 0.5) * 6;
+          d.body.angularVelocity.z += (Math.random() - 0.5) * 6;
+        }
+      }
+      if (!inBuzz && now >= prerollNextThump) {
+        prerollNextThump = now + 300 + Math.random() * 500;
+        for (const d of dice) {
+          if (d.body.position.y < PLATFORM_Y + CFG.dieSize * 1.5) {
+            d.body.velocity.y = Math.max(d.body.velocity.y, 8 + Math.random() * 6);
+            d.body.velocity.x += (Math.random() - 0.5) * 4;
+            d.body.velocity.z += (Math.random() - 0.5) * 4;
+            d.body.angularVelocity.set(
+              (Math.random() - 0.5) * 20,
+              (Math.random() - 0.5) * 20,
+              (Math.random() - 0.5) * 20);
+          }
+        }
+      }
+      world.step(STEP, dt, 6);
+      clampDice();
+      _checkCollisionsForKnock();
+
+      const minDone = now - prerollT0 >= CFG.minAgitateMs;
+      if (minDone && serverValues) beginResolve();
+
+    } else if (phase === 'resolving') {
+      // fixed-step deterministic replay of the pre-simulated plan
+      stepDebt += dt;
+      let guard = 10;
+      while (stepDebt >= STEP && !resolveCtx.done && guard-- > 0) {
+        resolveStep(resolveCtx);
+        _checkCollisionsForKnock();
+        stepDebt -= STEP;
+      }
+      // Deck: a die hopping/twisting mid-settle with a perfectly still surface underneath it
+      // reads as "nothing was influencing it" -- looks like a physics glitch rather than a die
+      // still finding its rest. This used to only fake-vibrate during resolveCtx.correcting's
+      // active nudging bursts and sit dead still the rest of the time, even though dice keep
+      // moving on their own (rolling, tipping, re-settling) for the whole resolving phase, not
+      // just during a correction. Now vibrates continuously the entire time the dice aren't
+      // settled -- full amplitude while actively correcting, a smaller-but-still-present ambient
+      // shake otherwise -- so there's always a visible "cause" on screen for whatever a die does.
+      // Cloche only. The felt platform shaking under a still-settling die gives it a visible
+      // "cause"; asphalt doing the same thing just looks like the street is having a seizure.
+      if (!isWall()) {
+        const amp = resolveCtx.correcting ? 1 : 0.35;
+        platformMesh.position.y = (Math.sin(now / 1000 * 48) * 0.025 + Math.sin(now / 1000 * 19 + 0.7) * 0.015) * amp;
+      }
+
+      if (resolveCtx.done || resolveCtx.step >= CFG.maxResolveSteps * 2) {
+        finishResolve(now);
+      }
+    } else if (!isWall()) {
+      // Settle the cloche platform back to rest. The asphalt was never displaced, so there is
+      // nothing to decay -- and running this would drift it off its built position.
+      platformMesh.position.y *= 0.85;
+    }
+
+    renderIfOpen();
+  }
+
+  function renderIfOpen() {
+    if (!overlayEl.classList.contains('cdx-open')) return;
+    for (const d of dice) {
+      d.mesh.position.copy(d.body.position);
+      d.mesh.quaternion.copy(d.body.quaternion);
+    }
+    renderer.render(scene, camera);
+  }
+
+  // ---------- public API ----------
+  const ClocheDice = {
+    init(options = {}) {
+      if (inited) { this.configure(options); return; }
+      Object.assign(CFG, options);
+      buildOverlay();
+      buildScene();
+      buildDice(CFG.diceCount);
+      inited = true;
+      lastTime = performance.now();
+      rafId = requestAnimationFrame(loop);
+    },
+
+    configure(options = {}) {
+      const prevCount = CFG.diceCount, prevSize = CFG.dieSize;
+      Object.assign(CFG, options);
+      if (inited && (CFG.diceCount !== prevCount || CFG.dieSize !== prevSize)) {
+        if (phase === 'idle') buildDice(CFG.diceCount);
+      }
+    },
+
+    // valuesOrPromise: number[] or Promise<number[]>
+    roll(valuesOrPromise) {
+      if (!inited) return Promise.reject(new Error('ClocheDice.init() first'));
+      if (phase !== 'idle') return Promise.reject(new Error('roll in progress'));
+
+      return new Promise((resolve, reject) => {
+        activeResolve = resolve;
+        activeReject = reject;
+        serverValues = null;
+        rollT0 = performance.now();
+        prerollT0 = rollT0;
+        prerollNextThump = rollT0 + CFG.buzzMs;
+        resetDicePositions();
+        _touchingPairs = new Set(); // stale contacts from the last roll must not suppress this roll's first hit
+        phase = 'preroll';
+        labelEl.textContent = 'rolling';
+        showOverlay();
+        startTumbleNotes();
+
+        Promise.resolve(valuesOrPromise).then(values => {
+          if (!Array.isArray(values) || values.length !== dice.length ||
+              values.some(v => !Number.isInteger(v) || v < 1 || v > 6)) {
+            throw new Error('server values must be ' + dice.length + ' integers 1-6');
+          }
+          serverValues = values;
+        }).catch(err => {
+          phase = 'idle';
+          hideOverlay();
+          stopTumbleNotes();
+          const rej = activeReject; activeResolve = null; activeReject = null;
+          if (rej) rej(err);
+        });
+      });
+    },
+
+    isRolling: () => phase !== 'idle',
+    // Update per-die custom face art at runtime (craps-roguelike face relics).
+    // perDie = [{value:dataURL,...}, ...]; rebuilds the dice so the new textures
+    // take effect. Only when idle so a roll in progress isn't disturbed.
+    // (Addition to this standalone copy — not in the shared casino cloche-dice.)
+    setFaceArt: (perDie) => { CFG.faceImagesPerDie = perDie; if (inited && phase === 'idle') buildDice(CFG.diceCount); },
+    onResult: (fn) => resultCallbacks.push(fn),
+    // Exposed so other UI (the winner-modal coin waterfall) can reuse the exact same bell-chime
+    // instrument as the dice tumble instead of duplicating the synth or using a different sound.
+    playChimeNote: (volume) => playChimeNote(volume),
+    setMuted: (m) => { _muted = !!m; },
+    isMuted: () => _muted,
+    // Site-wide volume level (0-1) -- see the AudioSettings-wiring comment on _masterVolume
+    // above. 0 silences the same way setMuted(true) does.
+    setVolume: (v) => { _masterVolume = Math.max(0, Math.min(1, +v || 0)); },
+    getVolume: () => _masterVolume
+  };
+
+  global.ClocheDice = ClocheDice;
+})(window);

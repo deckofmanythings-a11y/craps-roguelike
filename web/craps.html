@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Craps Roguelike</title>
+<style>
+:root{
+  /* Palette lifted from heavenly-aces-casino/craps.html so this reads as the same family. */
+  --felt-bg: radial-gradient(ellipse at center, #1d6636 0%, #144d29 55%, #0a2f18 100%);
+  --box-fill: linear-gradient(180deg, rgba(20,70,40,.55) 0%, rgba(8,40,22,.75) 100%);
+  --box-fill-flat: linear-gradient(180deg, rgba(14,60,34,.55) 0%, rgba(6,35,20,.68) 100%);
+  --box-fill-lightest: linear-gradient(180deg, rgba(60,175,95,.5) 0%, rgba(32,115,62,.62) 100%);
+  --box-fill-darkest: linear-gradient(180deg, rgba(5,24,14,.75) 0%, rgba(1,9,5,.86) 100%);
+  --box-border: 2px solid rgba(255,255,255,.4);
+  --box-radius: 6px;
+  --font-heavy: "Arial Black", "Arial Bold", "Helvetica Neue", Helvetica, sans-serif;
+  --font-script: Georgia, "Times New Roman", serif;
+  --color-loss: #ff5c5c;
+  --color-passline: #4a9eff;
+  --color-gold: #ffd700;
+  --color-win: #4ade80;
+  --color-text: #ffffff;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:#07130c;color:var(--color-text);font-family:var(--font-heavy);
+  display:flex;flex-direction:column;align-items:center;min-height:100%;
+  user-select:none;-webkit-user-select:none;
+}
+
+/* ---- run HUD ---- */
+#runbar{
+  width:100%;max-width:1100px;display:flex;justify-content:space-between;align-items:center;
+  gap:14px;padding:10px 18px 4px;flex-wrap:wrap;
+}
+.brand{font-size:16px;letter-spacing:.05em}
+.brand small{display:block;font-size:10px;font-weight:400;color:#8fb79c;font-family:var(--font-script)}
+.meters{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.meter{text-align:center;min-width:64px}
+.meter .k{font-size:9px;color:#8fb79c;letter-spacing:.1em;text-transform:uppercase}
+.meter .v{font-size:20px;line-height:1.1}
+.meter .v.gold{color:var(--color-gold)}
+#m-bank{font-size:24px}
+.meter .v.pos{color:var(--color-win)}
+.meter .v.neg{color:var(--color-loss)}
+#round-label .v{font-size:15px}
+#round-label .prov{color:#e0a54a;font-size:9px;font-family:var(--font-script);letter-spacing:0}
+.pips{font-size:18px;letter-spacing:2px;line-height:1}
+.pips .live{color:var(--color-gold)}
+.pips .spent{color:#3a5647}
+.debuff-tag{
+  background:rgba(120,20,20,.5);border:1px solid #b02020;border-radius:6px;padding:3px 9px;
+  font-size:10px;font-family:var(--font-script);color:#ffbdbd;max-width:230px;line-height:1.2;
+}
+.debuff-tag b{color:#ff8a8a;font-family:var(--font-heavy);display:block;font-size:11px}
+
+/* bullet stake / progress toward target */
+#bulletbar{
+  width:100%;max-width:1100px;padding:0 18px 6px;display:flex;align-items:center;gap:14px;
+}
+#progress-wrap{flex:1;height:18px;background:rgba(0,0,0,.4);border-radius:999px;overflow:hidden;border:1px solid rgba(255,255,255,.15);position:relative}
+#progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#1e7a3a,#4ade80);transition:width .35s}
+#progress-fill.neg{background:linear-gradient(90deg,#7a1e1e,#ff5c5c)}
+#progress-txt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;letter-spacing:.04em;text-shadow:0 1px 2px #000}
+#stake-readout{font-size:13px;white-space:nowrap}
+#stake-readout b{color:var(--color-gold)}
+
+/* ---- felt ---- */
+#felt-wrap{width:100%;max-width:1100px;padding:0 14px}
+#felt-stage{
+  position:relative;width:100%;aspect-ratio:16/9;background:var(--felt-bg);
+  border-radius:18px;border:14px solid transparent;background-clip:padding-box;
+  box-shadow:0 0 0 3px #22140a, 0 0 0 11px #4a2c14, 0 12px 34px rgba(0,0,0,.6), inset 0 0 90px rgba(0,0,0,.55);
+  padding:3.2%;display:flex;flex-direction:column;gap:2.4%;overflow:hidden;
+  margin:16px 6px 22px;  /* clearance so the wood-rail shadow rings don't bleed onto the HUD rows */
+}
+#numline{display:grid;grid-template-columns:repeat(6,1fr);gap:1.2%;height:26%}
+.numbox{position:relative;background:var(--box-fill-flat);border:var(--box-border);border-radius:var(--box-radius);
+  display:flex;flex-direction:column;overflow:hidden}
+#numline.place-active .numbox{border-color:var(--color-gold)}
+.numbox .n{flex:1;display:flex;align-items:center;justify-content:center;font-size:clamp(16px,3vw,38px);line-height:1;text-shadow:0 2px 4px rgba(0,0,0,.6)}
+.numbox .n.word{font-family:var(--font-script);font-style:italic;font-size:clamp(13px,2.3vw,30px)}
+.numbox .place-lbl,.numbox .buy-lbl{display:none;flex-direction:column;align-items:center;justify-content:center;padding:2px 0 3px;line-height:1.05}
+.numbox .place-lbl{background:linear-gradient(180deg,rgba(20,70,40,.8),rgba(6,35,20,.92));border-top:1px solid rgba(255,255,255,.25)}
+.numbox .buy-lbl{background:linear-gradient(180deg,rgba(20,52,84,.92),rgba(12,34,58,.82));border-bottom:1px solid rgba(255,255,255,.25);cursor:pointer}
+.numbox .buy-lbl:hover{filter:brightness(1.25)}
+#numline.place-active .numbox .place-lbl{display:flex}
+#numline.buy-active .numbox .buy-lbl{display:flex}
+.numbox .place-lbl .pl,.numbox .buy-lbl .pl{font-size:clamp(7px,0.95vw,11px);font-weight:900;letter-spacing:.08em}
+.numbox .place-lbl .pl{color:#eafff2}
+.numbox .buy-lbl .pl{color:#ddf0ff}
+.numbox .place-lbl .odds,.numbox .buy-lbl .odds{font-size:clamp(7px,0.95vw,11px);font-weight:900;color:#cfe6d8}
+.numbox .place-lbl .odds s,.numbox .buy-lbl .odds s{color:#ff9a9a;opacity:.75;margin-right:3px}
+.numbox .place-lbl .odds b,.numbox .buy-lbl .odds b{color:var(--color-gold)}
+.numbox.clickable{cursor:pointer}
+.numbox.clickable:hover{box-shadow:0 0 0 2px var(--color-gold) inset, 0 0 14px rgba(255,215,0,.3) inset}
+.bar{position:relative;border:var(--box-border);border-radius:var(--box-radius);display:flex;align-items:center;
+  justify-content:center;text-align:center;cursor:pointer;transition:box-shadow .1s, filter .1s;flex-direction:column}
+.bar .lbl{font-size:clamp(13px,2.1vw,26px);letter-spacing:.06em;pointer-events:none}
+.bar .sub{font-size:clamp(8px,1.1vw,13px);color:#bfe0cc;font-weight:400;font-family:var(--font-script);pointer-events:none;margin-top:2px}
+.bar .payout{font-size:clamp(9px,1.4vw,16px);font-weight:900;letter-spacing:.04em;pointer-events:none;margin-top:2px;color:#dfeee6}
+.bar .payout s{opacity:.7;color:#ff9a9a;text-decoration-thickness:2px;margin-right:5px}
+.bar .payout b{color:var(--color-gold)}
+.bar.clickable:hover{box-shadow:0 0 0 2px var(--color-gold), 0 0 18px rgba(255,215,0,.35) inset}
+.bar.disabled{cursor:not-allowed;opacity:.4}
+.bar.won,.numbox.won{animation:betWin .7s ease}
+@keyframes betWin{0%{box-shadow:0 0 0 3px var(--color-win),0 0 26px var(--color-win) inset}100%{box-shadow:none}}
+#come-bar{height:16%;background:var(--box-fill)}
+#come-bar .lbl{color:#dfeee6}
+#field-bar{height:20%;background:var(--box-fill-lightest);gap:2px}
+#field-bar .field-head{display:flex;align-items:baseline;gap:10px;justify-content:center}
+#field-bar .field-head .payout{margin-top:0}
+#field-bar .nums{display:flex;gap:min(2vw,20px);font-size:clamp(12px,1.8vw,22px);font-weight:900}
+#field-bar .nums .dbl{color:var(--color-gold)}
+#line-row{display:grid;grid-template-columns:1fr 1.6fr;gap:1.6%;height:18%}
+#dp-bar{background:var(--box-fill-darkest)}
+#dp-bar .lbl{color:#dfeee6;font-size:clamp(11px,1.6vw,20px)}
+#pass-bar{background:var(--box-fill)}
+#pass-bar .lbl{color:var(--color-passline)}
+.chip{position:absolute;z-index:5;width:clamp(28px,4.6vw,54px);height:clamp(28px,4.6vw,54px);
+  display:flex;align-items:center;justify-content:center;pointer-events:none;
+  transform:translate(-50%,-50%);left:50%;top:50%;filter:drop-shadow(0 3px 4px rgba(0,0,0,.55))}
+.chip-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
+.chip-amt{position:relative;z-index:2;color:#fff;font-weight:900;font-family:var(--font-heavy);
+  font-size:clamp(9px,1.25vw,14px);text-shadow:0 1px 2px #000,0 0 3px rgba(0,0,0,.9)}
+.chip .lock{position:absolute;z-index:3;bottom:-5px;right:-6px;font-size:12px;line-height:1;filter:drop-shadow(0 1px 1px #000)}
+.chip .off{position:absolute;top:-7px;left:50%;transform:translateX(-50%);background:#b02020;color:#fff;
+  font-size:8px;font-weight:900;padding:0 3px;border-radius:3px;border:1px solid #fff;letter-spacing:.05em;font-family:var(--font-heavy)}
+#puck{position:absolute;z-index:6;width:clamp(28px,4.2vw,50px);height:clamp(28px,4.2vw,50px);border-radius:50%;
+  display:flex;align-items:center;justify-content:center;font-size:clamp(9px,1.2vw,13px);font-weight:900;
+  border:3px solid #fff;box-shadow:0 3px 8px rgba(0,0,0,.6);transition:left .3s, top .3s;
+  transform:translate(-50%,-50%);pointer-events:none;letter-spacing:.04em}
+#puck.off{background:#111;color:#eee}
+#puck.on{background:#f4f4f4;color:#0a7a2c}
+
+/* ---- controls ---- */
+#controls{width:100%;max-width:1100px;padding:12px 14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;justify-content:center}
+#chiprail{display:flex;gap:10px}
+.chip-btn{width:54px;height:54px;border-radius:50%;cursor:pointer;position:relative;
+  display:flex;align-items:center;justify-content:center;transition:transform .1s, filter .1s;
+  filter:drop-shadow(0 2px 3px rgba(0,0,0,.5))}
+.chip-btn img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
+.chip-btn span{position:relative;z-index:2;color:#fff;font-weight:900;font-family:var(--font-heavy);font-size:13px;text-shadow:0 1px 2px #000,0 0 3px rgba(0,0,0,.9)}
+.chip-btn.sel{transform:translateY(-5px);filter:drop-shadow(0 0 8px var(--color-gold))}
+.btn{padding:14px 30px;font-size:18px;font-weight:900;font-family:var(--font-heavy);letter-spacing:.05em;
+  cursor:pointer;border:none;border-radius:12px;color:#2a1800}
+.btn-lg{padding:18px 60px;font-size:24px}
+.btn-sm{padding:6px 12px;font-size:11px;border-radius:8px;letter-spacing:.06em}
+/* End Bullet: small, muted, pushed to the far right so it isn't next to ROLL */
+#end-btn{margin-left:auto;background:linear-gradient(180deg,#7a4444,#4a1e1e);color:#ffd0d0;box-shadow:0 2px 0 #380f0f;align-self:center}
+#end-btn:active{transform:translateY(2px);box-shadow:0 0 0 #380f0f}
+
+/* chip sweep: won spots drop chips IN, lost spots sweep chips AWAY */
+.chip-ghost{position:fixed;z-index:120;pointer-events:none;display:flex;flex-direction:column;align-items:center;
+  filter:drop-shadow(0 3px 5px rgba(0,0,0,.6))}
+.chip-ghost img{width:100%;height:100%;object-fit:contain}
+.chip-ghost .cg-amt{font-family:var(--font-heavy);font-weight:900;font-size:13px;margin-top:2px;text-shadow:0 1px 2px #000,0 0 3px #000}
+.chip-ghost.win .cg-amt{color:var(--color-win)}
+.chip-ghost.cg-winstart{transform:translateY(-42vh);opacity:0}
+.chip-ghost.cg-winin{transform:translateY(0);opacity:1;transition:transform .5s cubic-bezier(.22,.9,.32,1),opacity .28s ease-out}
+.chip-ghost.cg-winout{opacity:0;transition:opacity .35s ease-in .5s}
+.chip-ghost.cg-sweep{transform:translate(18px,-46vh) rotate(22deg);opacity:0;transition:transform .55s ease-in,opacity .5s ease-in}
+.btn-primary{background:linear-gradient(180deg,#ffe680 0%,#ffd700 45%,#c8930a 100%);box-shadow:0 4px 0 #7a5000, 0 6px 14px rgba(0,0,0,.5)}
+.btn-primary:active{transform:translateY(3px);box-shadow:0 1px 0 #7a5000}
+.btn-danger{background:linear-gradient(180deg,#ff9a9a,#c0392b);color:#fff;box-shadow:0 4px 0 #6e1a12}
+.btn-danger:active{transform:translateY(3px);box-shadow:0 1px 0 #6e1a12}
+.btn:disabled{filter:grayscale(.7) brightness(.7);cursor:not-allowed}
+#dice-readout{display:flex;gap:8px;align-items:center}
+.die{width:38px;height:38px;border-radius:8px;background:#fafafa;position:relative;box-shadow:inset 0 0 0 2px #ccc, 0 2px 4px rgba(0,0,0,.4)}
+.die .pip{position:absolute;width:7px;height:7px;border-radius:50%;background:#1a1a1a;transform:translate(-50%,-50%)}
+#msg{width:100%;max-width:1100px;min-height:20px;text-align:center;color:#bfe0cc;font-family:var(--font-script);font-size:14px;padding:0 14px 18px}
+.hint{color:#6f9a80;font-size:11px;font-family:var(--font-script)}
+
+/* ---- relic strip (owned relics + the two dice you build) ---- */
+#relic-strip{width:100%;max-width:1100px;padding:6px 14px 0;display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12px}
+#owned-relics{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.relic-chip{background:var(--box-fill-lightest);border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:3px 8px;font-size:11px;white-space:nowrap}
+.relic-chip.eco{background:linear-gradient(180deg,#3a3f6a,#232647)}
+.dice-build{display:flex;gap:14px;align-items:center;margin-left:auto}
+.die-col{display:flex;flex-direction:column;align-items:center;gap:3px}
+.die-col .nm{font-size:10px;color:#8fb79c;letter-spacing:.08em}
+.die-col.roxy .nm{color:#ff9ec7}
+.die-col.trixie .nm{color:#c9a0ff}
+.faces{display:grid;grid-template-columns:repeat(6,1fr);gap:3px}
+.face-slot{width:26px;height:26px;border-radius:5px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.18);
+  display:flex;align-items:center;justify-content:center;font-size:9px;color:#6f9a80;position:relative}
+.face-slot .fv{position:absolute;top:1px;left:2px;font-size:7px;color:#4a6b57}
+.face-slot.filled{border-color:var(--color-gold);color:#fff;font-size:13px}
+.face-slot.gold{background:radial-gradient(circle,#6a5210,#241c05)}
+.face-slot.glass{background:radial-gradient(circle,#2a5a6a,#0a2028)}
+.face-slot.lucky{background:radial-gradient(circle,#2a6a3a,#0a2814)}
+.face-slot.guardian{background:radial-gradient(circle,#5a2a6a,#200a28)}
+.face-slot.heavy{background:radial-gradient(circle,#5a4a2a,#28200a)}
+.face-slot.installable{cursor:pointer;border-color:var(--color-win);box-shadow:0 0 8px rgba(74,222,128,.6);animation:pulse 1s infinite}
+@keyframes pulse{50%{box-shadow:0 0 14px rgba(74,222,128,.9)}}
+
+/* ---- consumable tray ---- */
+#consumable-tray{display:flex;gap:6px;align-items:center}
+.con-btn{background:linear-gradient(180deg,#2a4a6a,#16283a);border:1px solid #4a7aaa;border-radius:8px;padding:6px 10px;
+  font-size:11px;font-family:var(--font-heavy);color:#dfeeff;cursor:pointer;white-space:nowrap;max-width:120px;line-height:1.1;text-align:center}
+.con-btn:hover{border-color:var(--color-gold)}
+.con-btn.armed{border-color:var(--color-gold);box-shadow:0 0 10px rgba(255,215,0,.5)}
+
+/* ---- shop ---- */
+.shop-panel{max-width:820px}
+.shop-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap}
+.shop-head .mk{font-size:18px;color:var(--color-gold)}
+.shop-sec{margin:14px 0 4px;font-size:12px;color:#8fb79c;letter-spacing:.1em;text-transform:uppercase;text-align:left;border-bottom:1px dashed rgba(255,255,255,.15);padding-bottom:4px}
+.offer-row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.offer{width:180px;background:linear-gradient(180deg,#0f3320,#08210f);border:2px solid rgba(255,255,255,.2);border-radius:10px;
+  padding:10px;text-align:left;display:flex;flex-direction:column;gap:5px}
+.offer.tier-common{border-color:#9fb4a8}
+.offer.tier-uncommon{border-color:#4a9eff}
+.offer.tier-rare{border-color:#ffd700;box-shadow:0 0 14px rgba(255,215,0,.25)}
+.offer .nm{font-size:14px;font-weight:900}
+.offer .tag{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:#8fb79c}
+.offer .tag .rare{color:#ffd700}.offer .tag .uncommon{color:#4a9eff}
+.offer .ds{font-size:11px;font-family:var(--font-script);color:#cfe6d8;line-height:1.35;flex:1}
+.offer .buy{margin-top:4px;padding:7px;border:none;border-radius:7px;font-family:var(--font-heavy);font-weight:900;font-size:13px;
+  background:linear-gradient(180deg,#ffe680,#c8930a);color:#2a1800;cursor:pointer}
+.offer .buy:disabled{filter:grayscale(.7) brightness(.7);cursor:not-allowed}
+.offer.bought{opacity:.5}
+.offer.bought .buy{background:#2a4a34;color:#8fb79c}
+.install-hint{background:rgba(74,222,128,.12);border:1px solid var(--color-win);border-radius:8px;padding:8px 12px;margin:10px 0;font-size:13px;color:#dfffe8}
+.felt-spot-btn{background:var(--box-fill-lightest);border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:6px 10px;margin:3px;font-family:var(--font-heavy);font-size:12px;color:#fff;cursor:pointer}
+.felt-spot-btn:hover{border-color:var(--color-gold)}
+.shop-actions{display:flex;gap:10px;justify-content:center;margin-top:16px}
+.shop-panel .install-dice{display:flex;gap:20px;justify-content:center;margin:8px 0}
+
+/* ---- overlay (round transitions / shop) ---- */
+#overlay{position:fixed;inset:0;z-index:150;display:none;align-items:center;justify-content:center;
+  background:rgba(3,10,6,.82);backdrop-filter:blur(3px)}
+#overlay.open{display:flex}
+.panel{background:linear-gradient(180deg,#123b23,#0a2415);border:2px solid rgba(255,255,255,.18);
+  border-radius:16px;padding:28px 34px;max-width:560px;width:calc(100% - 40px);text-align:center;
+  box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.panel h2{margin:0 0 6px;font-size:28px;letter-spacing:.04em}
+.panel h2.win{color:var(--color-win)}
+.panel h2.lose{color:var(--color-loss)}
+.panel .reward{font-size:16px;color:var(--color-gold);margin:10px 0}
+.panel .detail{font-size:13px;color:#bfe0cc;font-family:var(--font-script);margin:8px 0 18px;line-height:1.5}
+.shop-note{font-size:12px;color:#8fb79c;font-family:var(--font-script);border-top:1px dashed rgba(255,255,255,.15);margin-top:16px;padding-top:12px}
+.panel .btn{margin-top:6px}
+</style>
+</head>
+<body>
+  <div id="runbar">
+    <div class="brand">CRAPS ROGUELIKE<small>standalone playtest</small></div>
+    <div class="meters">
+      <div class="meter" id="round-label"><div class="k">Round</div><div class="v">Ante 1 · Small</div></div>
+      <div class="meter"><div class="k">Target</div><div class="v gold" id="m-target">+$50</div></div>
+      <div class="meter"><div class="k">Bullets</div><div class="v pips" id="m-bullets">●●●●●</div></div>
+      <div class="meter"><div class="k">Relics</div><div class="v" id="m-slots">0/5</div></div>
+      <div class="meter"><div class="k">Markers</div><div class="v gold" id="m-markers">0</div></div>
+      <div class="debuff-tag" id="m-debuff" style="display:none"></div>
+    </div>
+  </div>
+
+  <div id="bulletbar">
+    <div id="stake-readout">Stake <b>$100</b></div>
+    <div id="progress-wrap"><div id="progress-fill"></div><div id="progress-txt">+$0 / +$50</div></div>
+  </div>
+
+  <div id="felt-wrap">
+    <div id="felt-stage">
+      <div id="numline"></div>
+      <div class="bar" id="come-bar" data-bet="come"><span class="lbl">COME</span><span class="payout" id="pay-come"></span></div>
+      <div class="bar" id="field-bar" data-bet="field">
+        <span class="field-head"><span class="lbl">FIELD</span><span class="payout" id="pay-field"></span></span>
+        <span class="nums"><span class="dbl">2</span> 3 4 9 10 11 <span class="dbl">12</span></span>
+        <span class="sub">2 and 12 pay double</span>
+      </div>
+      <div id="line-row">
+        <div class="bar" id="dp-bar" data-bet="dp"><span class="lbl">DON'T PASS</span><span class="payout" id="pay-dp"></span></div>
+        <div class="bar" id="pass-bar" data-bet="pass"><span class="lbl">PASS LINE</span><span class="payout" id="pay-pass"></span></div>
+      </div>
+      <div id="puck" class="off">OFF</div>
+    </div>
+  </div>
+
+  <div id="relic-strip">
+    <div id="owned-relics"></div>
+    <div class="dice-build">
+      <div class="die-col roxy"><div class="nm">ROXY</div><div class="faces" id="faces-1"></div></div>
+      <div class="die-col trixie"><div class="nm">TRIXIE</div><div class="faces" id="faces-2"></div></div>
+    </div>
+  </div>
+
+  <div id="controls">
+    <div id="chiprail"></div>
+    <button class="btn btn-primary btn-lg" id="roll-btn">ROLL</button>
+    <div id="consumable-tray"></div>
+    <div id="dice-readout"><div class="die" id="die1"></div><div class="die" id="die2"></div></div>
+    <button class="btn btn-sm" id="end-btn">End Bullet</button>
+  </div>
+  <div id="msg"><span class="hint">Left-click a bet spot to add the selected chip · right-click to remove · then ROLL</span></div>
+
+  <div id="overlay"><div class="panel" id="overlay-panel"></div></div>
+
+  <script src="js/three.min.js"></script>
+  <script src="js/cannon.min.js"></script>
+  <script src="js/cloche-dice.js"></script>
+  <script src="js/winner-modal.js"></script>
+  <script src="js/craps-rules.js"></script>
+  <script src="js/roguelike.js"></script>
+  <script src="js/relics.js"></script>
+  <script>
+  'use strict';
+  const CR = window.CrapsRules, RL = window.Roguelike, RLC = window.Relics, Phase = CR.Phase;
+
+  const G = {
+    run: null,          // Roguelike run
+    s: null,            // CrapsResolver state for the current bullet
+    stake: 0,           // current bullet's money (starts at RL.STAKE)
+    chip: 25,
+    rolling: false,
+    lastRoll: null,
+    betweenBullets: false,
+    bulletState: null,  // per-hand relic flags (guardianUsed, glassBroken)
+    loadedArmed: false, // Loaded Dice consumable armed
+    stakeBonus: 0,      // per-bullet stake handouts (Comp Chip) — excluded from target net
+    shop: null,         // transient shop state {offers, rerolls, bought:Set, install}
+  };
+
+  // A bullet's net toward its target is your SECURE position: cash in hand plus
+  // every bet you could still take down, minus the $100 you started with.
+  // - A won "stays" bet (Field) keeps its principal on the felt and pays only
+  //   profit into the stake, so on-table money must be counted for it to register.
+  // - LOCKED CONTRACTS are excluded: a Pass Line bet once the point is on, and a
+  //   Come bet that's travelled to a number, can't be taken down and haven't
+  //   resolved — that money is committed and at risk, not secured. It only counts
+  //   once it actually resolves (point made returns it to the stake).
+  // - Comp Chip handouts are excluded: more ammo, not free progress.
+  function lockedContracts() {
+    const s = G.s; let v = 0;
+    if (s.PassLocked) v += (s.Bets.pass || 0) + (s.Bets.passodds || 0);
+    for (const c of s.ComeBets) v += c.Flat + c.Odds; // travelled come bets are contract
+    return v;
+  }
+  const bulletNet = () => G.stake + onTable() - lockedContracts() - RL.STAKE - G.stakeBonus;
+
+  const POINTS = [4, 5, 6, 8, 9, 10];   // point/come-point numbers (puck sits here)
+  const NUMS = POINTS;                   // Standard Place spread is 4-10; the full 2-12 (Crapless) is a Boss variant, not the base game
+  const WORD = { 6: 'SIX', 9: 'NINE' };
+  const DENOMS = [5, 25, 50, 100];
+  const MIN_CHIP = Math.min(...DENOMS);      // smallest bet you can make
+  const CHIP_ART = [100, 50, 25, 10, 5, 1]; // available chip-blank-N.webp, largest first
+  const chipDenom = (a) => CHIP_ART.find((d) => a >= d) || 1;
+  const $ = (id) => document.getElementById(id);
+  const money = (n) => '$' + (Math.round(n * 100) / 100).toLocaleString('en-US');
+  const signed = (n) => (n >= 0 ? '+' : '−') + '$' + Math.abs(Math.round(n * 100) / 100).toLocaleString('en-US');
+
+  // ---- build number line + chip rail ----
+  (function build() {
+    const nl = $('numline');
+    NUMS.forEach((n) => {
+      const box = document.createElement('div');
+      box.className = 'numbox'; box.id = 'num-' + n;
+      box.innerHTML = `<div class="buy-lbl"><div class="pl">BUY</div><div class="odds"></div></div>` +
+        `<div class="n ${WORD[n] ? 'word' : ''}">${WORD[n] || n}</div>` +
+        `<div class="place-lbl"><div class="pl">PLACE</div><div class="odds"></div></div>`;
+      // The box splits at its vertical midpoint: top half = BUY, bottom half = PLACE
+      // (matching the BUY label on top / PLACE label on bottom). Left-click places,
+      // right-click removes — so right-clicking a Buy chip (top half) removes the Buy.
+      box.addEventListener('click', (e) => place(zoneBet(n, box, e)));
+      box.addEventListener('contextmenu', (e) => { e.preventDefault(); remove(zoneBet(n, box, e)); });
+      nl.appendChild(box);
+    });
+    const rail = $('chiprail');
+    DENOMS.forEach((d) => {
+      const b = document.createElement('div');
+      b.className = 'chip-btn'; b.dataset.d = d;
+      b.innerHTML = `<img src="chip-blank-${d}.webp" alt=""><span>${d}</span>`;
+      b.onclick = () => { G.chip = d; render(); };
+      rail.appendChild(b);
+    });
+  })();
+
+  // ---- betting ----
+  const bulletLive = () => !!(G.run && G.run.round && G.run.round.bulletActive && !G.rolling);
+  // Which bet a click on a number box means: top half = Buy, bottom half = Place
+  // (falls back to whichever is unlocked if only one is).
+  function zoneBet(n, box, e) {
+    const rect = box.getBoundingClientRect();
+    const topHalf = (e.clientY - rect.top) < rect.height / 2;
+    const buyOK = !!G.run.unlocks.buy, placeOK = !!G.run.unlocks.place;
+    if (topHalf && buyOK) return 'buy' + n;
+    if (!topHalf && placeOK) return 'place' + n;
+    return (placeOK ? 'place' : 'buy') + n;
+  }
+  function canPlace(key) {
+    if (!bulletLive()) return false;
+    const s = G.s;
+    if (key === 'pass' || key === 'dp') return s.Phase === Phase.ComeOut;
+    if (key === 'come') return s.Phase === Phase.Point;
+    if (key === 'field') return true;
+    if (key.startsWith('place')) return !!G.run.unlocks.place;
+    if (key.startsWith('buy')) return !!G.run.unlocks.buy;
+    return false;
+  }
+  function canRemove(key) {
+    if (!bulletLive()) return false;
+    if (key === 'pass' && G.s.PassLocked) return false;
+    return (G.s.Bets[key] || 0) > 0;
+  }
+  function place(key) {
+    if (!canPlace(key)) { message("Can't place " + key.toUpperCase() + ' right now.'); return; }
+    if (G.stake < G.chip) { message('Not enough stake for a ' + money(G.chip) + ' chip.'); return; }
+    G.stake -= G.chip;
+    G.s.Bets[key] = (G.s.Bets[key] || 0) + G.chip;
+    render();
+  }
+  function remove(key) {
+    if (!canRemove(key)) return;
+    const cur = G.s.Bets[key] || 0, take = Math.min(G.chip, cur), left = cur - take;
+    if (left > 0) G.s.Bets[key] = left; else delete G.s.Bets[key];
+    G.stake += take;
+    render();
+  }
+  document.querySelectorAll('.bar[data-bet]').forEach((el) => {
+    const key = el.dataset.bet;
+    el.addEventListener('click', () => place(key));
+    el.addEventListener('contextmenu', (e) => { e.preventDefault(); remove(key); });
+  });
+
+  // Total of everything currently staked on the felt (for Fold reclaim + display).
+  function onTable() {
+    let t = 0;
+    for (const k in G.s.Bets) t += G.s.Bets[k];
+    for (const c of G.s.ComeBets) t += c.Flat + c.Odds;
+    for (const c of G.s.DontComeBets) t += c.Flat + c.Odds;
+    return t;
+  }
+
+  // ---- bullet / round lifecycle ----
+  function startRound() {
+    RL.startRound(G.run);
+    // Extra Chamber vouchers add bullets to every round.
+    const bonus = RLC.extraBullets(G.run);
+    G.run.round.bulletsLeft += bonus;
+    G.run.round.bulletsTotal += bonus;
+    beginBullet();
+  }
+  function beginBullet() {
+    if (!RL.startBullet(G.run)) return;
+    G.s = CR.makeState(CR.Mode.Standard);
+    G.s.BetsOn = false;  // Place/Buy are OFF on the come-out (standard craps); they work once a point is on
+    G.stake = RL.STAKE;
+    G.lastRoll = null;
+    G.betweenBullets = false;
+    G.bulletState = { guardianUsed: false, glassBroken: {} }; // per-hand relic flags
+    G.loadedArmed = false;
+    G.stakeBonus = 0;
+    message('New bullet — $' + RL.STAKE + ' stake. Reach ' + signed(G.run.round.target) + ' to clear the round.');
+    render();
+  }
+
+  async function roll() {
+    if (!bulletLive()) return;
+    if (typeof ClocheDice !== 'undefined' && ClocheDice.isRolling()) return;
+    G.rolling = true; render();
+
+    // Relic-aware dice: Heavy weighting + Guardian swap + armed Loaded Dice.
+    const opts = { pointPhase: G.s.Phase === Phase.Point, noSeven: G.loadedArmed };
+    const [d1, d2] = RLC.rollDice(G.run, Math.random, G.bulletState, opts);
+    const dodged = G.bulletState.lastSwap;
+    // Loaded Dice is spent only on a point-phase roll (where a 7 would seven-out);
+    // it rides along through come-out rolls until it actually matters.
+    if (G.loadedArmed && opts.pointPhase) G.loadedArmed = false;
+
+    try { if (typeof ClocheDice !== 'undefined') await ClocheDice.roll([d1, d2]); } catch (e) {}
+    const preKeys = liveKeys();               // bets on the felt going into this roll
+    G.s.Bankroll = 0;
+    const res = CR.resolve(G.s, d1, d2);
+    G.stake += G.s.Bankroll;
+    // Relic winnings (payout/felt multipliers, Gold/Glass/Lucky faces).
+    const fx = RLC.postResolve(G.run, res, d1, d2, G.bulletState, Math.random);
+    G.stake += fx.extra;
+    runChipSweeps(preKeys, res);              // winners drop in, losers sweep away
+    G.lastRoll = res;
+    G.rolling = false;
+
+    const net = bulletNet();
+    const winParts = Object.keys(res.wins).map((k) => labelFor(k) + ' +$' + Math.round(res.wins[k]));
+    flashWins(res.wins);
+    let msg = summarize(res);
+    if (dodged) msg = 'A seven was swapped away! ' + msg;
+    if (winParts.length) msg += ' — ' + winParts.join(', ');
+    if (fx.events.length) msg += '  [relics: ' + fx.events.join(', ') + ']';
+
+    message(msg);  // always announce the roll
+    // The round clears the instant this bullet's net hits target.
+    if (net >= G.run.round.target) { finishBullet(net); return; }
+    // A seven-out does NOT end the bullet — the resolver reset us to a fresh
+    // come-out, so keep playing this bullet's remaining stake. A bullet ends only
+    // when you can't meet the ante's Min Bet (nothing left on the felt), or you End Bullet.
+    const mb = RL.minBet(G.run);
+    if (G.stake < mb && onTable() === 0) { message(msg + ' Below the $' + mb + ' min bet — bullet done at ' + signed(net) + '.'); finishBullet(net); return; }
+    render();
+  }
+
+  function finishBullet(net) {
+    // endBullet banks `net` into the run's persistent total bankroll.
+    const outcome = RL.endBullet(G.run, net);
+    render();
+    if (outcome.cleared) { WinnerModal.show(Math.max(net, 1), { big: true }); setTimeout(showRoundClear, 900); }
+    else if (outcome.lost) setTimeout(showRoundLost, 500);
+    else { G.betweenBullets = true; render(); } // lives remain — wait for Next Bullet
+  }
+
+  // ---- overlays ----
+  function overlay(html, cls) { const p = $('overlay-panel'); p.className = 'panel' + (cls ? ' ' + cls : ''); p.innerHTML = html; $('overlay').classList.add('open'); }
+  function closeOverlay() { $('overlay').classList.remove('open'); }
+
+  function showRoundClear() {
+    const r = G.run.round;
+    overlay(
+      `<h2 class="win">Round Cleared!</h2>` +
+      `<div class="detail">${RL.label(G.run)} — target ${signed(r.target)} met.</div>` +
+      `<div class="reward">+${r.reward} Markers &nbsp;<span style="color:#8fb79c;font-size:12px">(base ${RL.REWARD_BASE} + ${r.leftoverBullets} leftover bullet${r.leftoverBullets === 1 ? '' : 's'})</span></div>` +
+      `<button class="btn btn-primary" id="ov-continue">To the Shop</button>`
+    );
+    $('ov-continue').onclick = enterShop;
+  }
+  function enterShop() {
+    const interest = RLC.payInterest(G.run);
+    G.shop = { offers: RLC.generateShop(G.run, Math.random), rerolls: 0, bought: new Set(), interest, install: null };
+    renderShop();
+  }
+
+  function feltSpots() {
+    const spots = [['pass', 'Pass Line'], ['dp', "Don't Pass"], ['come', 'Come'], ['field', 'Field']];
+    if (G.run.unlocks.place) POINTS.forEach((n) => spots.push(['place' + n, 'Place ' + n]));
+    return spots;
+  }
+  function noRoomLabel(relic) {
+    if (relic.type === 'payout' || relic.type === 'economy') return 'No slots';
+    if (relic.type === 'face') return 'Faces full';
+    if (relic.type === 'consumable') return 'Full';
+    return 'Owned';
+  }
+  function offerCard(relic, key) {
+    if (!relic) return '';
+    const owned = G.shop.bought.has(key);
+    const price = RLC.priceOf(G.run, relic);
+    const can = RLC.canAcquire(G.run, relic);
+    const afford = G.run.markers >= price;
+    const dis = owned || !afford || !can;
+    const label = owned ? 'Bought' : (!can ? noRoomLabel(relic) : `Buy · ${price}`);
+    return `<div class="offer tier-${relic.tier} ${owned ? 'bought' : ''}">
+      <div class="nm">${relic.name}</div>
+      <div class="tag"><span class="${relic.tier}">${relic.tier}</span> · ${relic.type}</div>
+      <div class="ds">${relic.desc}</div>
+      <button class="buy" data-key="${key}" ${dis ? 'disabled' : ''}>${label}</button>
+    </div>`;
+  }
+
+  function renderShop() {
+    const sh = G.shop, run = G.run;
+    // install sub-panel takes over the body while a face/felt relic waits to be placed
+    if (sh.install) return renderInstall();
+
+    const sec = (title, offers, prefix) => {
+      const cards = offers.map((r, i) => offerCard(r, prefix + i)).join('');
+      return cards ? `<div class="shop-sec">${title}</div><div class="offer-row">${cards}</div>` : '';
+    };
+    const rerollC = RLC.rerollCost(run, sh.rerolls);
+    overlay(
+      `<div class="shop-head">
+        <h2 style="margin:0">The Shop</h2>
+        <div class="mk">Markers: <b>${run.markers}</b>${sh.interest ? ` <span style="color:#8fb79c;font-size:12px">(+${sh.interest} interest)</span>` : ''}</div>
+      </div>
+      <div style="font-size:12px;color:#8fb79c;text-align:left;margin-bottom:6px">Relic slots ${RLC.slotsUsed(run)}/${RLC.slotsMax(run)} · Faces open ${RLC.faceEmptyCount(run)}/12 · Consumables ${run.consumables.length}/${RLC.MAX_CONSUMABLES}</div>` +
+      sec('Relics', sh.offers.relics, 'r') +
+      sec('Table Access', sh.offers.table, 't') +
+      sec('Vouchers', sh.offers.vouchers, 'v') +
+      sec('Consumables', sh.offers.consumables, 'c') +
+      `<div class="shop-actions">
+        <button class="btn btn-primary" id="ov-reroll" ${run.markers < rerollC ? 'disabled' : ''}>Reroll · ${rerollC}</button>
+        <button class="btn btn-primary" id="ov-leave">Leave Shop</button>
+      </div>`,
+      'shop-panel'
+    );
+    const offerFor = (key) => {
+      const grp = { r: 'relics', t: 'table', v: 'vouchers', c: 'consumables' }[key[0]];
+      return sh.offers[grp][+key.slice(1)];
+    };
+    document.querySelectorAll('#overlay-panel .buy').forEach((b) => {
+      b.onclick = () => buy(offerFor(b.dataset.key), b.dataset.key);
+    });
+    $('ov-reroll').onclick = () => {
+      const c = RLC.rerollCost(run, sh.rerolls);
+      if (run.markers < c) return;
+      run.markers -= c; sh.rerolls++;
+      sh.offers.relics = RLC.generateShop(run, Math.random).relics;
+      sh.offers.consumables = RLC.generateShop(run, Math.random).consumables;
+      // re-key bought entries are stale after reroll for the rerolled groups
+      sh.bought = new Set([...sh.bought].filter((k) => k[0] === 't' || k[0] === 'v'));
+      renderShop();
+    };
+    $('ov-leave').onclick = leaveShop;
+  }
+
+  function buy(relic, key) {
+    const run = G.run;
+    if (!relic || G.shop.bought.has(key)) return;
+    const price = RLC.priceOf(run, relic);
+    if (run.markers < price || !RLC.canAcquire(run, relic)) return;
+    run.markers -= price;
+    if (relic.type === 'face' || relic.type === 'felt') {
+      G.shop.install = { relic, key };  // needs a placement target
+      renderShop();
+    } else {
+      RLC.acquireSimple(run, relic);
+      G.shop.bought.add(key);
+      renderShop();
+      render();
+    }
+  }
+
+  function renderInstall() {
+    const { relic } = G.shop.install;
+    if (relic.type === 'face') {
+      const grid = (die) => RLC.def && G.run.faces[die].map((slot, idx) => {
+        const filled = !!slot;
+        const cls = filled ? 'filled ' + slot.kind : 'installable';
+        return `<div class="face-slot ${cls}" data-die="${die}" data-idx="${idx}" ${filled ? '' : 'data-empty="1"'}>
+          <span class="fv">${idx + 1}</span>${filled ? faceGlyph(slot.kind) : ''}</div>`;
+      }).join('');
+      overlay(
+        `<h2 style="margin:0 0 4px">Install ${relic.name}</h2>
+        <div class="install-hint">Click an open face to install. ${relic.pref === RLC.DIE.ROXY ? 'Leans Roxy (physics).' : 'Leans Trixie (payout).'}</div>
+        <div class="install-dice">
+          <div class="die-col roxy"><div class="nm">ROXY</div><div class="faces">${grid(1)}</div></div>
+          <div class="die-col trixie"><div class="nm">TRIXIE</div><div class="faces">${grid(2)}</div></div>
+        </div>
+        <div class="shop-actions"><button class="btn btn-danger" id="ov-cancel">Cancel</button></div>`,
+        'shop-panel'
+      );
+      document.querySelectorAll('#overlay-panel .face-slot[data-empty]').forEach((el) => {
+        el.onclick = () => { RLC.installFace(G.run, relic, +el.dataset.die, +el.dataset.idx); finishInstall(); };
+      });
+    } else { // felt
+      const btns = feltSpots().map(([k, label]) => `<button class="felt-spot-btn" data-spot="${k}">${label}</button>`).join('');
+      overlay(
+        `<h2 style="margin:0 0 4px">Install ${relic.name}</h2>
+        <div class="install-hint">Choose a bet spot to permanently boost by +50%.</div>
+        <div style="margin:10px 0">${btns}</div>
+        <div class="shop-actions"><button class="btn btn-danger" id="ov-cancel">Cancel</button></div>`,
+        'shop-panel'
+      );
+      document.querySelectorAll('#overlay-panel .felt-spot-btn').forEach((el) => {
+        el.onclick = () => { RLC.installFelt(G.run, relic, el.dataset.spot); finishInstall(); };
+      });
+    }
+    $('ov-cancel').onclick = () => { G.run.markers += RLC.priceOf(G.run, relic); G.shop.install = null; renderShop(); }; // refund
+  }
+  function finishInstall() {
+    G.shop.bought.add(G.shop.install.key);
+    G.shop.install = null;
+    updateDiceArt();  // reflect the newly-installed face on the 3D dice
+    renderShop();
+    render();
+  }
+  function faceGlyph(kind) {
+    return { gold: '$', glass: '◆', lucky: '★', guardian: '🛡', heavy: '⬇' }[kind] || '●';
+  }
+
+  function leaveShop() {
+    closeOverlay();
+    RL.advance(G.run);
+    if (G.run.over) showRunWon(); else startRound();
+  }
+  function showRoundLost() {
+    overlay(
+      `<h2 class="lose">Busted</h2>` +
+      `<div class="detail">Out of bullets at ${RL.label(G.run)}, ${signed(G.run.round.target)} target.<br>Markers banked this run: ${G.run.markers}</div>` +
+      `<button class="btn btn-primary" id="ov-new">New Run</button>`
+    );
+    $('ov-new').onclick = () => { closeOverlay(); newRun(); };
+  }
+  function showRunWon() {
+    overlay(`<h2 class="win">RUN CLEARED</h2><div class="detail">All 8 Antes beaten. Markers: ${G.run.markers}</div><button class="btn btn-primary" id="ov-new">New Run</button>`);
+    $('ov-new').onclick = () => { closeOverlay(); newRun(); };
+  }
+
+  function summarize(res) {
+    const t = {
+      'seven-win': 'Seven on the come-out — front line winner!',
+      'natural-win': 'Natural eleven — Pass Line wins.',
+      'craps': 'Craps — Pass Line loses. Come out again.',
+      'point-made': 'Point made! Pass Line wins.',
+      'seven-out': 'Seven out — line away.',
+    }[res.tag];
+    const base = `Rolled ${res.d1} + ${res.d2} = ${res.sum}.`;
+    return t ? base + ' ' + t : base;
+  }
+  function message(m) { $('msg').textContent = m; }
+
+  // ---- felt payout labels (written on the felt; relics strike & rewrite them) ----
+  const BASE_PAYOUT = { pass: [1, 1], dp: [1, 1], come: [1, 1], field: [1, 1] };
+  const BUY_ODDS = { 4: [2, 1], 5: [3, 2], 6: [6, 5], 8: [6, 5], 9: [3, 2], 10: [2, 1] }; // true odds (5% vig on win)
+  const fmtNum = (n) => String(Math.round(n * 100) / 100);
+  // effective winnings multiplier for a bet key = 1 + Σ(payout relics) + felt install (additive)
+  function effMult(key) {
+    let m = 1;
+    G.run.relics.forEach((id) => { const mm = RLC.def(id).mult; if (mm && mm[key]) m += mm[key] - 1; });
+    if (G.run.feltMult[key]) m += G.run.feltMult[key] - 1;
+    return m;
+  }
+  function payoutHTML(a, b, m) {
+    if (m === 1) return `${fmtNum(a)}:${b}`;
+    return `<s>${fmtNum(a)}:${b}</s><b>${fmtNum(a * m)}:${b}</b>`;
+  }
+
+  const BET_LABELS = { pass: 'Pass Line', dp: "Don't Pass", come: 'Come', field: 'Field',
+    passodds: 'Pass Odds', dpodds: "DP Odds", horn: 'Horn', cande: 'C&E', eleven: 'Eleven',
+    any7: 'Seven', anyCraps: 'Any Craps', aces: 'Aces', ace2: 'Ace-Deuce', yo: 'Yo',
+    midnight: 'Midnight', bonusLow: 'Low Rolls', bonusHigh: 'High Rolls', bonusAll: "Roll'em All" };
+  function labelFor(k) {
+    if (BET_LABELS[k]) return BET_LABELS[k];
+    const m = k.match(/^(place|buy|hard|come|dc)(\d+)$/);
+    if (m) return ({ place: 'Place', buy: 'Buy', hard: 'Hard', come: 'Come', dc: "Don't Come" }[m[1]]) + ' ' + m[2];
+    return k;
+  }
+  // Briefly flash the felt spot(s) that just paid, so a win is unmistakable.
+  function flashWins(wins) {
+    Object.keys(wins).forEach((k) => {
+      let el = document.querySelector('.bar[data-bet="' + k + '"]');
+      const pm = k.match(/^(place|come|dc)(\d+)$/);
+      if (!el && pm) el = $('num-' + pm[2]);
+      if (el) { el.classList.add('won'); setTimeout(() => el.classList.remove('won'), 700); }
+    });
+  }
+
+  // ---- rendering ----
+  const PIPS = { 1:[[50,50]], 2:[[28,28],[72,72]], 3:[[28,28],[50,50],[72,72]],
+    4:[[28,28],[72,28],[28,72],[72,72]], 5:[[28,28],[72,28],[50,50],[28,72],[72,72]],
+    6:[[28,28],[72,28],[28,50],[72,50],[28,72],[72,72]] };
+  function drawDie(el, v) { el.innerHTML = ''; if (!v) return; PIPS[v].forEach(([x,y]) => { const p=document.createElement('div'); p.className='pip'; p.style.left=x+'%'; p.style.top=y+'%'; el.appendChild(p); }); }
+  function chipEl(a, opts) {
+    opts = opts || {};
+    const c = document.createElement('div'); c.className = 'chip';
+    const img = document.createElement('img'); img.className = 'chip-img'; img.src = 'chip-blank-' + chipDenom(a) + '.webp'; img.alt = '';
+    c.appendChild(img);
+    const t = document.createElement('span'); t.className = 'chip-amt'; t.textContent = a >= 1000 ? (Math.round(a / 100) / 10) + 'k' : a;
+    c.appendChild(t);
+    if (opts.locked) { const l = document.createElement('span'); l.className = 'lock'; l.textContent = '🔒'; c.appendChild(l); }
+    if (opts.off) { const o = document.createElement('span'); o.className = 'off'; o.textContent = 'OFF'; c.appendChild(o); }
+    return c;
+  }
+
+  // --- chip sweep: winners drop chips IN, losers sweep chips AWAY ---
+  function feltSpotEl(key) {
+    if (['pass', 'dp', 'come', 'field'].includes(key)) return document.querySelector('.bar[data-bet="' + key + '"]');
+    const m = key.match(/^(place|buy|come|dc|hard)(\d+)$/);
+    if (m) return $('num-' + m[2]);
+    return null;
+  }
+  function liveKeys() {
+    const s = G.s, set = new Set();
+    if (s) {
+      for (const k in s.Bets) if (s.Bets[k] > 0) set.add(k);
+      for (const c of s.ComeBets) set.add('come' + c.Num);
+      for (const c of s.DontComeBets) set.add('dc' + c.Num);
+    }
+    return set;
+  }
+  function sweepChip(el, kind, amount) {
+    if (!el) return;
+    const r = el.getBoundingClientRect(), sz = 46;
+    const g = document.createElement('div');
+    g.className = 'chip-ghost ' + kind + (kind === 'win' ? ' cg-winstart' : '');
+    g.innerHTML = `<img src="chip-blank-${chipDenom(amount || 5)}.webp" alt="">` +
+      (kind === 'win' && amount ? `<div class="cg-amt">+$${Math.round(amount)}</div>` : '');
+    g.style.width = sz + 'px'; g.style.height = sz + 'px';
+    g.style.left = (r.left + r.width / 2 - sz / 2) + 'px';
+    g.style.top = (r.top + r.height / 2 - sz / 2) + 'px';
+    document.body.appendChild(g);
+    if (kind === 'win') {
+      requestAnimationFrame(() => requestAnimationFrame(() => { g.classList.remove('cg-winstart'); g.classList.add('cg-winin'); }));
+      setTimeout(() => g.classList.add('cg-winout'), 620);
+      setTimeout(() => g.remove(), 1000);
+    } else {
+      requestAnimationFrame(() => requestAnimationFrame(() => g.classList.add('cg-sweep')));
+      setTimeout(() => g.remove(), 650);
+    }
+  }
+  function runChipSweeps(preKeys, res) {
+    const now = liveKeys();
+    Object.keys(res.wins).forEach((k) => sweepChip(feltSpotEl(k), 'win', res.wins[k]));
+    preKeys.forEach((k) => { if (k !== 'come' && k !== 'dc' && !now.has(k) && !res.wins[k]) sweepChip(feltSpotEl(k), 'lose'); });
+  }
+
+  // --- custom 3D dice face art for installed face relics ---
+  const FACE_TINTS = {
+    gold: ['#fff0b0', '#c8930a'], glass: ['#bfe8ff', '#3a7a9a'], lucky: ['#bff0c8', '#2a8a4a'],
+    guardian: ['#e6c8ff', '#6a2aa0'], heavy: ['#dccaa0', '#5a4a2a'],
+  };
+  const CANVAS_GLYPH = { gold: '$', glass: '◆', lucky: '★', guardian: '✚', heavy: '▼' };
+  function drawFaceArt(value, kind) {
+    const S = 256, c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d');
+    const t = FACE_TINTS[kind] || ['#faf6ea', '#d9d2bd'];
+    const grad = g.createRadialGradient(S / 2, S / 2, S * 0.2, S / 2, S / 2, S * 0.75);
+    grad.addColorStop(0, t[0]); grad.addColorStop(1, t[1]); g.fillStyle = grad; g.fillRect(0, 0, S, S);
+    g.fillStyle = '#141414';
+    (PIPS[value] || []).forEach(([x, y]) => { g.beginPath(); g.arc(x / 100 * S, y / 100 * S, S * 0.085, 0, Math.PI * 2); g.fill(); });
+    g.font = 'bold ' + Math.round(S * 0.22) + 'px Arial'; g.fillStyle = 'rgba(0,0,0,.5)';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(CANVAS_GLYPH[kind] || '', S * 0.8, S * 0.2);
+    return c.toDataURL();
+  }
+  // Push each die's installed-face art to the 3D dice (Roxy=index0, Trixie=index1).
+  function updateDiceArt() {
+    if (typeof ClocheDice === 'undefined' || !ClocheDice.setFaceArt) return;
+    const perDie = [{}, {}];
+    [1, 2].forEach((die) => { G.run.faces[die].forEach((slot, idx) => { if (slot) perDie[die - 1][idx + 1] = drawFaceArt(idx + 1, slot.kind); }); });
+    ClocheDice.setFaceArt(perDie);
+  }
+
+  function renderRelicStrip() {
+    const run = G.run, owned = $('owned-relics');
+    let html = '';
+    run.relics.forEach((id) => { const d = RLC.def(id); html += `<span class="relic-chip ${d.type === 'economy' ? 'eco' : ''}" title="${d.desc}">${d.name}</span>`; });
+    Object.keys(run.feltMult).forEach((k) => { html += `<span class="relic-chip" title="Felt boost">Felt · ${k}</span>`; });
+    owned.innerHTML = html || '<span class="hint">no relics yet</span>';
+    [1, 2].forEach((die) => {
+      $('faces-' + die).innerHTML = run.faces[die].map((slot, idx) => {
+        const cls = slot ? 'filled ' + slot.kind : '';
+        const title = slot ? RLC.def(slot.id).name + ' — ' + RLC.def(slot.id).desc : 'empty · face ' + (idx + 1);
+        return `<div class="face-slot ${cls}" title="${title}"><span class="fv">${idx + 1}</span>${slot ? faceGlyph(slot.kind) : ''}</div>`;
+      }).join('');
+    });
+  }
+
+  function renderConsumables() {
+    const tray = $('consumable-tray'); tray.innerHTML = '';
+    G.run.consumables.forEach((id, i) => {
+      const d = RLC.def(id);
+      const b = document.createElement('button');
+      b.className = 'con-btn' + (d.consumable.kind === 'loaded' && G.loadedArmed ? ' armed' : '');
+      b.textContent = d.name; b.title = d.desc;
+      b.onclick = () => useConsumable(i);
+      tray.appendChild(b);
+    });
+  }
+  function useConsumable(i) {
+    if (!bulletLive()) { message('Use consumables during a live bullet.'); return; }
+    const id = G.run.consumables[i], d = RLC.def(id);
+    if (d.consumable.kind === 'comp') {
+      G.stake += d.consumable.amount; G.stakeBonus += d.consumable.amount;
+      G.run.consumables.splice(i, 1);
+      message('Comp Chip — +$' + d.consumable.amount + ' to play with (does not count toward target).');
+    } else if (d.consumable.kind === 'loaded') {
+      if (G.loadedArmed) { message('Loaded Dice already armed.'); return; }
+      G.loadedArmed = true; G.run.consumables.splice(i, 1);
+      message('Loaded Dice armed — your next roll cannot seven-out.');
+    }
+    render();
+  }
+
+  function render() {
+    const run = G.run, r = run.round, s = G.s;
+
+    // run HUD
+    $('round-label').querySelector('.v').innerHTML = RL.label(run) + (RL.roundCfg(run).prov ? ' <span class="prov">(provisional)</span>' : '');
+    $('m-target').textContent = signed(r.target);
+    $('m-markers').textContent = run.markers;
+
+    const activeBonus = r.bulletActive ? 1 : 0;
+    let pips = '';
+    for (let i = 0; i < r.bulletsTotal; i++) pips += (i < r.bulletsLeft + activeBonus) ? '<span class="live">●</span>' : '<span class="spent">○</span>';
+    $('m-bullets').innerHTML = pips;
+    $('m-slots').textContent = RLC.slotsUsed(run) + '/' + RLC.slotsMax(run);
+    renderRelicStrip();
+    renderConsumables();
+
+    const dbg = RL.debuffInfo(RL.roundCfg(run).debuff);
+    const dEl = $('m-debuff');
+    if (dbg) { dEl.style.display = ''; dEl.innerHTML = `<b>${dbg.name}</b>${dbg.desc}`; } else dEl.style.display = 'none';
+
+    // bullet stake + progress
+    const net = r.bulletActive ? bulletNet() : 0;
+    $('stake-readout').innerHTML = r.bulletActive
+      ? `Stake <b>${money(G.stake)}</b> &nbsp;·&nbsp; on table ${money(onTable())} &nbsp;·&nbsp; min bet $${RL.minBet(run)}`
+      : `<span class="hint">between bullets</span>`;
+    const pct = Math.max(0, Math.min(100, (net / r.target) * 100));
+    const pf = $('progress-fill');
+    pf.style.width = pct + '%';
+    pf.classList.toggle('neg', net < 0);
+    $('progress-txt').textContent = `${signed(net)} / ${signed(r.target)}`;
+
+    // phase pill + puck
+    const puck = $('puck'), stage = $('felt-stage');
+    if (s && s.Phase === Phase.Point) {
+      const box = $('num-' + s.Point), br = box.getBoundingClientRect(), sr = stage.getBoundingClientRect();
+      puck.className = 'on'; puck.textContent = 'ON';
+      puck.style.left = (br.left - sr.left + br.width / 2) + 'px';
+      puck.style.top = (br.top - sr.top + br.height / 2) + 'px';
+    } else {
+      // Park the OFF puck in the empty left of the COME bar — below the number
+      // line, so it never covers the Place chips on the 4/5/6.
+      puck.className = 'off'; puck.textContent = 'OFF';
+      const cb = $('come-bar').getBoundingClientRect(), sr = stage.getBoundingClientRect();
+      puck.style.left = (cb.left - sr.left + cb.height * 0.7) + 'px';
+      puck.style.top = (cb.top - sr.top + cb.height / 2) + 'px';
+    }
+
+    // a bet is "working" (will resolve) this roll iff act; Place/Buy are off on the come-out
+    const act = s && (s.Phase === Phase.Point || s.BetsOn) && !s.BetsOffThisRoll;
+    const placeOff = s && !act;
+
+    // bet chips + gating (Pass shows a lock once its contract is locked on a point)
+    document.querySelectorAll('.bar[data-bet]').forEach((el) => {
+      const key = el.dataset.bet;
+      el.querySelector('.chip')?.remove();
+      const amt = (s && s.Bets[key]) || 0;
+      if (amt > 0) el.appendChild(chipEl(amt, { locked: key === 'pass' && s.PassLocked }));
+      el.classList.toggle('clickable', canPlace(key));
+      el.classList.toggle('disabled', !canPlace(key) && amt === 0);
+    });
+    // payout labels on the main bars (relics strike the base and rewrite it)
+    ['pass', 'dp', 'come', 'field'].forEach((k) => { const p = $('pay-' + k); if (p) { const [a, b] = BASE_PAYOUT[k]; p.innerHTML = payoutHTML(a, b, effMult(k)); } });
+    // PLACE (bottom strip) / BUY (top strip) labels appear when Table Access unlocks them
+    $('numline').classList.toggle('place-active', !!run.unlocks.place);
+    $('numline').classList.toggle('buy-active', !!run.unlocks.buy);
+    NUMS.forEach((n) => {
+      const box = $('num-' + n);
+      box.querySelectorAll('.chip').forEach((c) => c.remove());
+      const pd = CR.PayoutTables.NumDefs[n];
+      // PLACE / BUY odds labels (relics strike & rewrite the ratio)
+      const podds = box.querySelector('.place-lbl .odds');
+      if (podds && run.unlocks.place) podds.innerHTML = payoutHTML(pd.placeWin, pd.placeDen, effMult('place' + n));
+      const bodds = box.querySelector('.buy-lbl .odds');
+      if (bodds && run.unlocks.buy) { const bo = BUY_ODDS[n]; bodds.innerHTML = payoutHTML(bo[0], bo[1], effMult('buy' + n)); }
+      // travelled Come bet — locked contract (only 4-10 ever travel here)
+      const cb = s && s.ComeBets.find((c) => c.Num === n);
+      if (cb) { const c = chipEl(cb.Flat, { locked: true }); c.style.left = '50%'; c.style.top = '50%'; box.appendChild(c); }
+      // Buy chip (top) / Place chip (bottom) — both OFF on the come-out
+      const bamt = (s && s.Bets['buy' + n]) || 0;
+      if (bamt > 0) { const c = chipEl(bamt, { off: placeOff }); c.style.left = '50%'; c.style.top = '30%'; box.appendChild(c); }
+      const pamt = (s && s.Bets['place' + n]) || 0;
+      if (pamt > 0) { const c = chipEl(pamt, { off: placeOff }); c.style.left = '50%'; c.style.top = '70%'; box.appendChild(c); }
+      box.classList.toggle('clickable', canPlace('place' + n));
+    });
+
+    document.querySelectorAll('.chip-btn').forEach((b) => b.classList.toggle('sel', +b.dataset.d === G.chip));
+    drawDie($('die1'), G.lastRoll ? G.lastRoll.d1 : 0);
+    drawDie($('die2'), G.lastRoll ? G.lastRoll.d2 : 0);
+
+    // contextual buttons — ROLL + END BULLET during a live bullet, NEXT BULLET between them
+    const rollBtn = $('roll-btn'), endBtn = $('end-btn');
+    if (G.betweenBullets && RL.canStartBullet(run)) {
+      rollBtn.textContent = 'NEXT BULLET'; rollBtn.disabled = false; endBtn.style.display = 'none';
+    } else {
+      rollBtn.textContent = 'ROLL'; rollBtn.disabled = !bulletLive();
+      endBtn.style.display = ''; endBtn.disabled = !bulletLive();
+    }
+  }
+
+  $('roll-btn').onclick = () => { if (G.betweenBullets) beginBullet(); else roll(); };
+  $('end-btn').onclick = () => { if (bulletLive()) { const n = bulletNet(); message('Ended the bullet at ' + signed(n) + '.'); finishBullet(n); } };
+
+  function newRun() {
+    G.run = RL.newRun();
+    RLC.initRun(G.run);
+    updateDiceArt();  // reset dice to plain faces
+    startRound();
+  }
+
+  try { if (typeof ClocheDice !== 'undefined') ClocheDice.init({ diceCount: 2, dieSize: 2.0 }); } catch (e) {}
+  window.addEventListener('resize', render);
+  newRun();
+  window.G = G; window.RL = RL;
+  </script>
+</body>
+</html>

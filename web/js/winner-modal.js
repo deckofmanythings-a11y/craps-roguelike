@@ -1,0 +1,396 @@
+/* ============================================================
+   winner-modal.js
+   Shared "you win $X" overlay for the bubble machine tables: metallic
+   gold payout text over a soft-edged dark glass panel sized to the actual
+   text, twinkling sparkles and a sweeping shine glint over the number,
+   a 3D flipping gold-coin firework waterfall, and a "big win"
+   pulse/enlarge state. Builds its own DOM (like cloche-dice.js) so a
+   host page just needs one script include and one function call.
+
+   Requires (load before this file):
+     cloche-dice.js -- optional; if window.ClocheDice.playChimeNote
+     exists, the coin waterfall reuses its bell-chime instrument for an
+     "excited" coin-shower sound. Works without it, just silently.
+
+   INTEGRATION:
+     WinnerModal.show(amount);
+     WinnerModal.show(amount, { big: true });
+     WinnerModal.show(amount, { big: bestFor1>=7, onClose: playAgain });
+
+   amount<=0 is a no-op (matches every host page's existing behavior:
+   no modal for a zero payout, caller just moves on).
+   ============================================================ */
+(function (global) {
+  'use strict';
+
+  let overlayEl, amtEl, glassEl, coinsEl, bigtagEl, titleEl;
+  let winnerTimer = null, _winnerAmount = 0, _winnerAnimating = false, _onClose = null;
+
+  // ---------- DOM ----------
+  // Fixed scatter of 7 spots (percentages of the amount-wrap box, so they track any payout
+  // width) rather than JS-random positions -- random placement risked sparkles clumping
+  // together or landing right on top of each other for short amounts. Each spot's own twinkle
+  // timing (duration + negative delay) IS randomized, so they still pop independently.
+  function buildSparklesHTML() {
+    // The panel is sized tight to the text (see sizeWinnerGlass) so the glyphs occupy roughly
+    // the middle 60-80% of the box both ways -- the old spots (several within y:18-82%) landed
+    // squarely on top of digits instead of around them. These sit in the actual margin: the four
+    // corners plus top-center, all outside that occupied band, and smaller so they read as
+    // accents instead of blobs.
+    const spots = [
+      { x: 6, y: 10, s: 12 }, { x: 94, y: 10, s: 14 }, { x: 50, y: 5, s: 11 },
+      { x: 6, y: 90, s: 12 }, { x: 94, y: 90, s: 14 }
+    ];
+    let html = '';
+    spots.forEach(function (p) {
+      const dur = (1.1 + Math.random() * 1.3).toFixed(2);
+      const delay = (Math.random() * 2).toFixed(2);
+      html += '<div class="wm-winner-sparkle" style="left:' + p.x + '%;top:' + p.y + '%;width:' + p.s + 'px;height:' + p.s + 'px;animation-duration:' + dur + 's;animation-delay:-' + delay + 's"></div>';
+    });
+    return html;
+  }
+
+  function buildOverlay() {
+    const style = document.createElement('style');
+    style.textContent = [
+      // pointer-events:none -- this used to be tap-to-dismiss, which meant it had to capture
+      // clicks over the whole viewport. Deck: let it just play out on its own timer instead and
+      // never block anything underneath it, including Roll/Fire -- show() below already just
+      // restarts cleanly (clears the old timer, resets the amount/animation) if it's called
+      // again while still open.
+      '#wm-modal-winner{position:fixed;inset:0;z-index:200;display:flex;align-items:flex-start;justify-content:center;padding-top:8vh;pointer-events:none}',
+      '#wm-modal-winner.hidden{display:none}',
+      '.wm-winner-box{position:relative;background:transparent;border:none;padding:20px 36px;text-align:center;box-shadow:none;animation:wmWinnerPop .3s cubic-bezier(.34,1.56,.64,1)}',
+      '@keyframes wmWinnerPop{from{transform:scale(.5);opacity:0}to{transform:scale(1);opacity:1}}',
+      '.wm-winner-title{position:relative;z-index:2;font-size:38px;font-weight:900;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.6);letter-spacing:.05em;line-height:1;margin-bottom:6px}',
+      '.wm-winner-amount-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;margin-top:5px}',
+      '.wm-winner-amount{position:relative;z-index:2;font-size:124px;font-weight:900;isolation:isolate;',
+      '  display:inline-flex;align-items:center;justify-content:center;line-height:1;',
+      '  background:linear-gradient(180deg,#fff6cf 0%,#ffd700 20%,#a8720a 48%,#ffe680 55%,#c8930a 75%,#7a5000 100%);',
+      '  -webkit-background-clip:text;background-clip:text;color:transparent;',
+      '  -webkit-text-stroke:1.5px #5c3d00;',
+      '  filter:drop-shadow(0 3px 2px rgba(0,0,0,.5)) drop-shadow(0 0 24px rgba(255,215,0,.8));',
+      '  letter-spacing:.02em}',
+      // wm-winner-glass replaces the old god-ray sunburst: turns out the "rays" in the reference
+      // clip were camera glare off a real cabinet's glass screen, not an app effect. What's
+      // actually there is a wide, soft-edged dark band behind the number -- feathered edges via
+      // radial-gradient (no hard border/stroke), sized to the payout text by sizeWinnerGlass()
+      // below, static (no animation, matching the reference). The tint is a --wm-glass-rgb
+      // custom property (default cold navy) rather than a hardcoded color -- a host page can
+      // override it per call via show(amount,{glassRgb:'r,g,b'}) so the panel can match its own
+      // board instead of clashing (e.g. sic-bo's light cream/gold felt wants a warm dark tone,
+      // not navy).
+      // ellipse closest-side (not the default farthest-corner) matters here: on a wide-but-short
+      // box, farthest-corner measures every stop against the long diagonal, so the fade hadn't
+      // actually finished by the time it hit the top/bottom edges -- a visible hard line right
+      // at the box boundary. closest-side scales each axis to its OWN edge, so the fade
+      // completes on all four sides. Opacity also bumped up (was reading as a washed-out grey
+      // smudge against light boards, not a solid card) -- the color is what should read as the
+      // panel's identity, transparency is only for the taper at the rim.
+      '.wm-winner-glass{',
+      '  position:absolute;top:50%;left:50%;width:440px;height:180px;z-index:1;pointer-events:none;',
+      '  transform:translate(-50%,-50%);--wm-glass-rgb:12,16,34;',
+      '  background:radial-gradient(ellipse closest-side at center,rgba(var(--wm-glass-rgb),.92) 0%,rgba(var(--wm-glass-rgb),.85) 38%,rgba(var(--wm-glass-rgb),.55) 62%,rgba(var(--wm-glass-rgb),0) 92%);',
+      '}',
+      '.wm-winner-coins{position:absolute;top:50%;left:50%;width:0;height:0;z-index:1;pointer-events:none;}',
+      // Sparkles: small 4-point glint stars (radial glow core + a thin cross of light through
+      // it, the classic "twinkle" icon shape) scattered around the number at fixed spots (see
+      // buildSparklesHTML() above), each with its own randomized twinkle speed so they don't
+      // flash in unison.
+      '.wm-winner-sparkles{position:absolute;inset:0;z-index:3;pointer-events:none;}',
+      '.wm-winner-sparkle{',
+      '  position:absolute;pointer-events:none;border-radius:50%;',
+      '  background:radial-gradient(circle,rgba(255,255,255,.95) 0%,rgba(255,244,200,.55) 35%,rgba(255,244,200,0) 70%);',
+      '  animation-name:wmSparkleTwinkle;animation-timing-function:ease-in-out;animation-iteration-count:infinite;',
+      '}',
+      '.wm-winner-sparkle::before,.wm-winner-sparkle::after{content:"";position:absolute;top:50%;left:50%;background:linear-gradient(90deg,transparent,#fff,transparent);}',
+      '.wm-winner-sparkle::before{width:220%;height:2px;transform:translate(-50%,-50%);}',
+      '.wm-winner-sparkle::after{width:2px;height:220%;transform:translate(-50%,-50%);}',
+      // transform:translate(-50%,-50%) is baked into every keyframe (not set as a separate base
+      // rule) because an animated transform replaces the property outright rather than composing
+      // with a static one -- omitting it here would let each sparkle's own top/left percentage
+      // (its center point) drift to become its top-left corner instead.
+      '@keyframes wmSparkleTwinkle{',
+      '  0%,100%{opacity:0;transform:translate(-50%,-50%) scale(.15) rotate(0deg)}',
+      '  50%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(25deg)}',
+      '}',
+      // Shine: previously a big blended rectangle sweeping over the whole amount-wrap, which
+      // smeared against the dark glass panel and the gaps between letters, not just the gold
+      // digits -- looked like a harsh diagonal smudge. Replaced with the standard "clipped text
+      // shimmer" trick instead: a ::after that duplicates the number via attr(data-value) (kept
+      // in sync by JS alongside every amtEl.textContent write) and clips ITS OWN moving highlight
+      // gradient to the exact glyph shapes with background-clip:text, same as the base gold fill
+      // -- so the shine only ever touches the letters themselves.
+      '.wm-winner-amount::after{',
+      '  content:attr(data-value);position:absolute;inset:0;z-index:3;pointer-events:none;',
+      '  display:inline-flex;align-items:center;justify-content:center;',
+      '  background:linear-gradient(100deg,transparent 35%,rgba(255,255,255,.95) 50%,transparent 65%);',
+      '  background-size:260% 100%;background-position:-130% 0;background-repeat:no-repeat;',
+      '  -webkit-background-clip:text;background-clip:text;color:transparent;',
+      '  -webkit-text-stroke:1.5px transparent;',
+      '  animation:wmShineSweep 3.6s ease-in-out infinite;',
+      '}',
+      '@keyframes wmShineSweep{0%{background-position:-130% 0}22%{background-position:130% 0}100%{background-position:130% 0}}',
+      '#wm-modal-winner.big .wm-winner-box{animation:wmWinnerPop .35s cubic-bezier(.34,1.56,.64,1),wmBigWinPulse 1.1s ease-in-out infinite .35s}',
+      '@keyframes wmBigWinPulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.25)}}',
+      '#wm-modal-winner.big .wm-winner-title{font-size:48px}',
+      '#wm-modal-winner.big .wm-winner-amount{font-size:160px}',
+      '.wm-winner-bigtag{display:none;position:relative;z-index:2;font-size:24px;font-weight:900;letter-spacing:.15em;color:#ffe680;text-shadow:0 2px 6px rgba(0,0,0,.7);margin-bottom:2px}',
+      '#wm-modal-winner.big .wm-winner-bigtag{display:block}',
+      // ---------- PUSH state: calmer sibling of the win celebration (no coin shower, no
+      // sparkles/shine, silver/platinum text instead of gold; the glass panel stays -- it's
+      // just a legibility backdrop, not a celebration effect) -- see showPush() below.
+      '#wm-modal-winner.push .wm-winner-sparkles{display:none}',
+      '#wm-modal-winner.push .wm-winner-amount::after{display:none}',
+      '#wm-modal-winner.push .wm-winner-amount{',
+      '  background:linear-gradient(180deg,#f4f6f8 0%,#d8dee3 20%,#8b959c 48%,#eef1f3 55%,#aab2b8 75%,#5a6268 100%);',
+      '  -webkit-background-clip:text;background-clip:text;color:transparent;',
+      '  -webkit-text-stroke:1.5px #3a4045;',
+      '  filter:drop-shadow(0 3px 2px rgba(0,0,0,.5)) drop-shadow(0 0 18px rgba(200,210,220,.6))}',
+      '.wm-coin3d-wrap{position:absolute;top:0;left:0;pointer-events:none;transform-style:preserve-3d;}',
+      '.wm-coin3d-inner{position:relative;width:100%;height:100%;transform-style:preserve-3d;}',
+      '.wm-coin3d-face{position:absolute;inset:0;border-radius:50%;backface-visibility:hidden;overflow:hidden;box-shadow:inset 0 0 4px rgba(0,0,0,.45);}',
+      '.wm-coin3d-face.wm-coin3d-front{transform:rotateX(90deg) translateZ(var(--wm-coin-half-t,3px));}',
+      '.wm-coin3d-face.wm-coin3d-back{transform:rotateX(-90deg) translateZ(var(--wm-coin-half-t,3px));}',
+      '.wm-coin3d-face-img{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;',
+      '  background:radial-gradient(circle at 35% 28%,#fff8d6,#ffd700 42%,#c8930a 78%,#7a5000 100%);',
+      '  color:#7a5000;font-weight:900;text-shadow:0 1px 0 rgba(255,255,255,.5);}',
+      '.wm-coin3d-front .wm-coin3d-face-img{transform:scale(-1,-1);}',
+      '.wm-coin3d-edge-seg{position:absolute;left:50%;top:50%;background:linear-gradient(90deg,#8a6c1a,#ffe680 50%,#8a6c1a);backface-visibility:hidden;}'
+    ].join('');
+    document.head.appendChild(style);
+
+    overlayEl = document.createElement('div');
+    overlayEl.id = 'wm-modal-winner';
+    overlayEl.className = 'hidden';
+    overlayEl.innerHTML =
+      '<div class="wm-winner-box">' +
+        '<div class="wm-winner-bigtag">BIG WIN</div>' +
+        '<div class="wm-winner-title">🎉 Congratulations, you win 🎉</div>' +
+        '<div class="wm-winner-amount-wrap">' +
+          '<div class="wm-winner-glass"></div>' +
+          '<div class="wm-winner-coins"></div>' +
+          '<div class="wm-winner-amount" data-value="$0.00">$0.00</div>' +
+          '<div class="wm-winner-sparkles">' + buildSparklesHTML() + '</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlayEl);
+    amtEl = overlayEl.querySelector('.wm-winner-amount');
+    glassEl = overlayEl.querySelector('.wm-winner-glass');
+    coinsEl = overlayEl.querySelector('.wm-winner-coins');
+    bigtagEl = overlayEl.querySelector('.wm-winner-bigtag');
+    titleEl = overlayEl.querySelector('.wm-winner-title');
+  }
+
+  // ---------- coins ----------
+  // One reusable 3D coin builder (front/back faces + a ring of rim segments -- same technique
+  // as the craps puck's extrusion) so the winner-amount coin waterfall gets real flipping discs
+  // instead of flat spinning emoji.
+  function createCoin3D(size) {
+    const half = Math.max(2, size * 0.11);
+    const wrap = document.createElement('div'); wrap.className = 'wm-coin3d-wrap';
+    wrap.style.width = size + 'px'; wrap.style.height = size + 'px';
+    wrap.style.setProperty('--wm-coin-half-t', half + 'px');
+    const inner = document.createElement('div'); inner.className = 'wm-coin3d-inner';
+    const front = document.createElement('div'); front.className = 'wm-coin3d-face wm-coin3d-front';
+    const frontImg = document.createElement('div'); frontImg.className = 'wm-coin3d-face-img'; frontImg.textContent = '$'; frontImg.style.fontSize = (size * 0.52) + 'px'; front.appendChild(frontImg);
+    const back = document.createElement('div'); back.className = 'wm-coin3d-face wm-coin3d-back';
+    const backImg = document.createElement('div'); backImg.className = 'wm-coin3d-face-img'; backImg.textContent = '$'; backImg.style.fontSize = (size * 0.52) + 'px'; back.appendChild(backImg);
+    inner.appendChild(front); inner.appendChild(back);
+    const R = size / 2, SEGS = 20;
+    const segW = 2 * R * Math.sin(Math.PI / SEGS) * 1.05;
+    for (let i = 0; i < SEGS; i++) {
+      const seg = document.createElement('div'); seg.className = 'wm-coin3d-edge-seg';
+      const angle = (360 / SEGS) * i;
+      seg.style.cssText = 'width:' + segW.toFixed(2) + 'px;height:' + (half * 2).toFixed(2) + 'px;margin-left:-' + (segW / 2).toFixed(2) + 'px;margin-top:-' + half.toFixed(2) + 'px;transform:rotateY(' + angle + 'deg) translateZ(' + R + 'px)';
+      inner.appendChild(seg);
+    }
+    wrap.appendChild(inner);
+    return { wrap, inner };
+  }
+
+  // Real firework physics: every coin launches from the exact same point (the shared center
+  // anchor, which is also the glass panel's center) and bursts outward within a 135deg cone facing
+  // straight down -- i.e. angles from 22.5deg to 157.5deg in standard screen-angle terms
+  // (0deg=right, 90deg=straight down, 180deg=left), never sideways-up or backwards-up. Each
+  // coin travels outward along its own angle for the "explosion" phase, then gravity takes
+  // over and pulls it further straight down for the "falling to earth" phase.
+  function spawnCoinWaterfall(n) {
+    if (!coinsEl) return;
+    for (let i = 0; i < n; i++) {
+      const size = (16 + Math.random() * 26) * 2;
+      const { wrap, inner } = createCoin3D(size);
+      wrap.style.marginLeft = (-size / 2) + 'px'; wrap.style.marginTop = (-size / 2) + 'px';
+      coinsEl.appendChild(wrap);
+      const angleDeg = 90 + (Math.random() - 0.5) * 135;
+      const angleRad = angleDeg * Math.PI / 180;
+      const dx = Math.cos(angleRad), dy = Math.sin(angleRad);
+      const burst = 130 + Math.random() * 260;
+      const gravityFall = 280 + Math.random() * 320;
+      const dur = 1100 + Math.random() * 900;
+      const delay = Math.random() * 1800;
+      const p1x = dx * burst * 0.45, p1y = dy * burst * 0.45;
+      const p2x = dx * burst, p2y = dy * burst + gravityFall * 0.4;
+      const p3x = dx * burst * 1.1, p3y = dy * burst + gravityFall;
+      // Both Animation objects are kept (rather than left to the return-value-discarded default)
+      // and explicitly .cancel()'d alongside wrap.remove() below -- fill:'forwards' keeps a
+      // finished animation "current" on the document's timeline indefinitely, and on WebKit/
+      // Safari that keeps the Animation (and the coin element it targets) alive even after the
+      // element is detached from the DOM, since detaching the target isn't what releases it --
+      // only cancel() (or the animation never having fill:forwards) does. With a coin waterfall
+      // spawning up to 56 coins x2 animations on every single win, every hand played on iOS was
+      // leaking dozens of these permanently -- this is what actually accumulated into the
+      // reported slowdown (confirmed to reproduce in real mobile Safari, not just Discord's
+      // WebView, and NOT reproducible in Chromium, which releases finished fill:forwards
+      // animations on element removal without needing an explicit cancel()).
+      const anim1=wrap.animate([
+        { transform: 'translate(0px,0px)', opacity: 0 },
+        { transform: 'translate(' + p1x.toFixed(1) + 'px,' + p1y.toFixed(1) + 'px)', opacity: 1, offset: 0.12 },
+        { transform: 'translate(' + p2x.toFixed(1) + 'px,' + p2y.toFixed(1) + 'px)', opacity: 1, offset: 0.7 },
+        { transform: 'translate(' + p3x.toFixed(1) + 'px,' + p3y.toFixed(1) + 'px)', opacity: 0 }
+      ], { duration: dur, delay, easing: 'cubic-bezier(.25,.46,.45,.94)', fill: 'forwards' });
+      const spinX = (Math.random() < 0.5 ? -1 : 1) * (720 + Math.random() * 720);
+      const spinY = (Math.random() < 0.5 ? -1 : 1) * (360 + Math.random() * 720);
+      const anim2=inner.animate([
+        { transform: 'rotateX(90deg)' },
+        { transform: 'rotateY(' + spinY + 'deg) rotateX(' + spinX + 'deg) rotateX(90deg)' }
+      ], { duration: dur, delay, easing: 'linear', fill: 'forwards' });
+      setTimeout(() => { anim1.cancel(); anim2.cancel(); wrap.remove(); }, delay + dur + 150);
+    }
+    // Reuses the exact same bell-chime instrument as the dice tumble (cloche-dice.js), just an
+    // "excited" version of it: faster note cadence and louder, rather than a separate coin-clink
+    // sample set. Duration scales with coin count so a bigger win rings a bit longer.
+    playCoinChimeShower(Math.min(3200, 900 + n * 35));
+  }
+
+  function playCoinChimeShower(durationMs) {
+    if (!global.ClocheDice || !global.ClocheDice.playChimeNote) return;
+    const start = performance.now();
+    (function tick() {
+      if (performance.now() - start >= durationMs) return;
+      global.ClocheDice.playChimeNote(1.3);
+      setTimeout(tick, 30 + Math.random() * 45);
+    })();
+  }
+
+  // The glass panel is sized to the actual rendered payout text (not a hardcoded guess) by
+  // measuring an offscreen clone with the final amount string -- the visible amount still
+  // starts at $0.00 and ticks up, so measuring the live element directly would size the panel
+  // far too small.
+  function sizeWinnerGlass(amount, fmt) {
+    if (!amtEl || !glassEl) return;
+    const clone = amtEl.cloneNode(false);
+    clone.textContent = fmt(amount);
+    clone.style.cssText += ';position:absolute;visibility:hidden;left:-9999px;top:-9999px;white-space:nowrap';
+    document.body.appendChild(clone);
+    const r = clone.getBoundingClientRect();
+    clone.remove();
+    glassEl.style.width = Math.max(300, r.width * 1.35) + 'px';
+    glassEl.style.height = Math.max(160, r.height * 2) + 'px';
+  }
+
+  function defaultFmt(n) {
+    return '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // Keeps data-value in lockstep with the visible text on every tick -- the shine's ::after
+  // reads it via attr(data-value) so its clipped highlight always matches the current digits,
+  // including mid-count-up, not just the final settled amount.
+  function setAmtText(text) {
+    amtEl.textContent = text;
+    amtEl.dataset.value = text;
+  }
+
+  // options.glassRgb (e.g. '43,24,6') lets a host page tint the glass panel to match its own
+  // board instead of the default navy -- inline style beats the class rule's --wm-glass-rgb
+  // fallback when set, and removeProperty() drops back to it when a call doesn't pass one.
+  function setGlassTint(glassRgb) {
+    if (glassRgb) glassEl.style.setProperty('--wm-glass-rgb', glassRgb);
+    else glassEl.style.removeProperty('--wm-glass-rgb');
+  }
+
+  // ---------- public API ----------
+  const WinnerModal = {
+    // amount<=0 is a no-op -- every host page's existing behavior is to just skip the modal
+    // entirely for a zero payout, not show a "$0.00" version of it.
+    show(amount, options) {
+      if (!overlayEl) buildOverlay();
+      if (!(amount > 0)) return;
+      options = options || {};
+      const fmt = options.fmt || defaultFmt;
+      if (winnerTimer) clearTimeout(winnerTimer);
+      _winnerAmount = amount; _winnerAnimating = true; _onClose = options.onClose || null;
+      overlayEl.classList.toggle('big', !!options.big);
+      overlayEl.classList.remove('push');
+      overlayEl.classList.remove('hidden');
+      titleEl.textContent = options.title || '🎉 Congratulations, you win 🎉';
+      setAmtText('$0.00');
+      setGlassTint(options.glassRgb);
+      sizeWinnerGlass(amount, fmt);
+      spawnCoinWaterfall(options.big ? 56 : 34);
+      const start = performance.now();
+      function tick(now) {
+        if (!_winnerAnimating) return;
+        const t = Math.min((now - start) / 2000, 1);
+        const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        setAmtText(fmt(Math.round(e * amount * 100) / 100));
+        if (t < 1) requestAnimationFrame(tick);
+        // held long enough for the longer coin shower to finish
+        else { _winnerAnimating = false; setAmtText(fmt(amount)); winnerTimer = setTimeout(() => WinnerModal.close(), 3000); }
+      }
+      requestAnimationFrame(tick);
+    },
+    // A push: bets returned, nothing actually won. Calmer sibling of show() -- no coin
+    // waterfall, silver/platinum text instead of gold, shorter hold. Still ticks the amount
+    // up (it's the stake being returned, a real number worth seeing).
+    showPush(amount, options) {
+      if (!overlayEl) buildOverlay();
+      if (!(amount > 0)) return;
+      options = options || {};
+      const fmt = options.fmt || defaultFmt;
+      if (winnerTimer) clearTimeout(winnerTimer);
+      _winnerAmount = amount; _winnerAnimating = true; _onClose = options.onClose || null;
+      overlayEl.classList.remove('big');
+      overlayEl.classList.add('push');
+      overlayEl.classList.remove('hidden');
+      titleEl.textContent = options.title || 'Push! Bets returned!';
+      setAmtText('$0.00');
+      setGlassTint(options.glassRgb);
+      sizeWinnerGlass(amount, fmt);
+      const start = performance.now();
+      function tick(now) {
+        if (!_winnerAnimating) return;
+        const t = Math.min((now - start) / 1200, 1);
+        const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        setAmtText(fmt(Math.round(e * amount * 100) / 100));
+        if (t < 1) requestAnimationFrame(tick);
+        else { _winnerAnimating = false; setAmtText(fmt(amount)); winnerTimer = setTimeout(() => WinnerModal.close(), 2000); }
+      }
+      requestAnimationFrame(tick);
+    },
+    close() {
+      if (!overlayEl) return;
+      overlayEl.classList.add('hidden');
+      overlayEl.classList.remove('big', 'push');
+      if (winnerTimer) { clearTimeout(winnerTimer); winnerTimer = null; }
+      const cb = _onClose; _onClose = null;
+      if (cb) cb();
+    },
+    // Same as close(), but discards the pending onClose callback instead of firing it --
+    // for a host page that wants to abandon the whole presentation chain and take over
+    // itself (e.g. a Repeat click skipping straight past a multi-modal payout sequence
+    // like Super Flush Rush -> main payout), rather than letting one more scripted step
+    // run first.
+    forceClose() {
+      if (!overlayEl) return;
+      overlayEl.classList.add('hidden');
+      overlayEl.classList.remove('big', 'push');
+      if (winnerTimer) { clearTimeout(winnerTimer); winnerTimer = null; }
+      _winnerAnimating = false;
+      _onClose = null;
+    },
+    isOpen: () => !!overlayEl && !overlayEl.classList.contains('hidden')
+  };
+
+  global.WinnerModal = WinnerModal;
+})(window);

@@ -1,0 +1,12 @@
+# Archived Unity project (108MB — never publish)
+_OLD_unity/
+
+# .NET build output (Simulator / RulesEngineTests)
+**/bin/
+**/obj/
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.user
+node_modules/
