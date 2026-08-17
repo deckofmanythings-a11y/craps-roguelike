@@ -218,6 +218,9 @@ body{
 .offer.tier-uncommon{border-color:#4a9eff}
 .offer.tier-rare{border-color:#ffd700;box-shadow:0 0 14px rgba(255,215,0,.25)}
 .offer .nm{font-size:14px;font-weight:900}
+.die-mark{font-size:11px;font-weight:900}
+.die-mark.roxy{color:#ff9ec7}
+.die-mark.trixie{color:#c9a0ff}
 .offer .tag{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:#8fb79c}
 .offer .tag .rare{color:#ffd700}.offer .tag .uncommon{color:#4a9eff}
 .offer .ds{font-size:11px;font-family:var(--font-script);color:#cfe6d8;line-height:1.35;flex:1}
@@ -555,8 +558,10 @@ body{
     const afford = G.run.markers >= price;
     const dis = owned || !afford || !can;
     const label = owned ? 'Bought' : (!can ? noRoomLabel(relic) : `Buy · ${price}`);
+    const dieName = relic.die === RLC.DIE.ROXY ? 'Roxy' : relic.die === RLC.DIE.TRIXIE ? 'Trixie' : '';
+    const dieMark = dieName ? ` <span class="die-mark ${dieName.toLowerCase()}">${dieName}</span>` : '';
     return `<div class="offer tier-${relic.tier} ${owned ? 'bought' : ''}">
-      <div class="nm">${relic.name}</div>
+      <div class="nm">${relic.name}${dieMark}</div>
       <div class="tag"><span class="${relic.tier}">${relic.tier}</span> · ${relic.type}</div>
       <div class="ds">${relic.desc}</div>
       <button class="buy" data-key="${key}" ${dis ? 'disabled' : ''}>${label}</button>
