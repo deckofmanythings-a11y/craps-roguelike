@@ -387,8 +387,8 @@ body{
   function lockedContracts() {
     const s = G.s; let v = 0;
     if (s.PassLocked) v += (s.Bets.pass || 0);          // only the flat Pass line is a locked contract
-    for (const c of s.ComeBets) v += c.Flat + c.Odds;   // travelled come bets are contract
-    return v;                                           // odds behind the line are removable -> counted
+    for (const c of s.ComeBets) v += c.Flat;            // the travelled Come FLAT is contract; its odds are removable
+    return v;                                           // odds behind the line are removable -> counted in net
   }
   const bulletNet = () => G.stake + onTable() - lockedContracts() - RL.STAKE - G.stakeBonus;
 
@@ -513,6 +513,28 @@ body{
     const take = Math.min(G.chip, cur);
     G.s.Bets[oddsKey] = cur - take; if (G.s.Bets[oddsKey] <= 0) delete G.s.Bets[oddsKey];
     G.stake += take; render();
+  }
+  // Come odds: click the come-point chip on a number box to lay odds on that
+  // travelled Come bet, capped like the line at maxOddsMult x its flat.
+  function layComeOdds(num) {
+    if (!bulletLive()) return;
+    const cb = G.s.ComeBets.find((c) => c.Num === num);
+    if (!cb) return;
+    const mult = RLC.maxOddsMult(G.run, num);
+    if (mult <= 0) { message('Odds not unlocked — buy Double Odds in the shop.'); return; }
+    const cap = mult * cb.Flat, cur = cb.Odds || 0;
+    const add = Math.min(G.chip, cap - cur, G.stake);
+    if (add <= 0) { message(cur >= cap ? `Max come odds on the ${num} (${mult}x) reached.` : 'Not enough stake for that chip.'); return; }
+    G.stake -= add; cb.Odds = cur + add;
+    message(`Laid ${money(add)} come odds on the ${num} (up to ${mult}x).`);
+    render();
+  }
+  function removeComeOdds(num) {
+    if (!bulletLive()) return;
+    const cb = G.s.ComeBets.find((c) => c.Num === num);
+    if (!cb || (cb.Odds || 0) <= 0) return;
+    const take = Math.min(G.chip, cb.Odds);
+    cb.Odds -= take; G.stake += take; render();
   }
   document.querySelectorAll('[data-bet]').forEach((el) => {   // bars + center props
     const key = el.dataset.bet;
@@ -1073,9 +1095,21 @@ body{
       if (podds && run.unlocks.place) podds.innerHTML = payoutHTML(pd.placeWin, pd.placeDen, effMult('place' + n));
       const bodds = box.querySelector('.buy-lbl .odds');
       if (bodds && run.unlocks.buy) { const bo = BUY_ODDS[n]; bodds.innerHTML = payoutHTML(bo[0], bo[1], effMult('buy' + n)); }
-      // travelled Come bet — locked contract (only 4-10 ever travel here)
+      // travelled Come bet — locked-contract flat chip; if odds are unlocked the
+      // chip itself becomes the come-odds target (stopPropagation so the box's
+      // Place/Buy zones don't also fire).
       const cb = s && s.ComeBets.find((c) => c.Num === n);
-      if (cb) { const c = chipEl(cb.Flat, { locked: true }); c.style.left = '50%'; c.style.top = '50%'; box.appendChild(c); }
+      if (cb) {
+        const c = chipEl(cb.Flat, { locked: true }); c.style.left = '50%'; c.style.top = '50%';
+        if (RLC.maxOddsMult(G.run, n) > 0) {
+          c.style.pointerEvents = 'auto'; c.style.cursor = 'pointer';
+          c.title = `Click to lay come odds (up to ${RLC.maxOddsMult(G.run, n)}x on the ${n})`;
+          c.addEventListener('click', (e) => { e.stopPropagation(); layComeOdds(n); });
+          c.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); removeComeOdds(n); });
+        }
+        box.appendChild(c);
+        if (cb.Odds > 0) { const oc = chipEl(cb.Odds); oc.classList.add('odds-chip'); box.appendChild(oc); }
+      }
       // Buy chip (top) / Place chip (bottom) — both OFF on the come-out
       const bamt = (s && s.Bets['buy' + n]) || 0;
       if (bamt > 0) { const c = chipEl(bamt, { off: placeOff }); c.style.left = '50%'; c.style.top = '30%'; box.appendChild(c); }
