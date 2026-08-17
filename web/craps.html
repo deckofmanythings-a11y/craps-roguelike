@@ -109,6 +109,20 @@ body{
 @keyframes betWin{0%{box-shadow:0 0 0 3px var(--color-win),0 0 26px var(--color-win) inset}100%{box-shadow:none}}
 #come-bar{height:16%;background:var(--box-fill)}
 #come-bar .lbl{color:#dfeee6}
+/* center props (hardways / any-7 / any-craps) — appears when any is unlocked */
+#center-bar{display:none;height:14%;gap:1.2%}
+#center-bar,#line-row{align-items:stretch}
+#felt-stage.has-center #center-bar{display:flex}
+#felt-stage.has-center #come-bar{height:12%}
+#felt-stage.has-center #field-bar{height:16%}
+.prop{position:relative;flex:1;display:none;flex-direction:column;align-items:center;justify-content:center;
+  background:var(--box-fill-darkest);border:var(--box-border);border-radius:var(--box-radius);cursor:pointer;
+  transition:box-shadow .1s,filter .1s}
+.prop.show{display:flex}
+.prop .lbl{font-size:clamp(9px,1.5vw,17px);letter-spacing:.04em;pointer-events:none;color:#ffd9a0}
+.prop .po{font-size:clamp(7px,1vw,12px);font-weight:900;color:var(--color-gold);pointer-events:none;margin-top:1px}
+.prop.clickable:hover{box-shadow:0 0 0 2px var(--color-gold),0 0 16px rgba(255,215,0,.35) inset}
+.prop.disabled{cursor:not-allowed;opacity:.4}
 #field-bar{height:20%;background:var(--box-fill-lightest);gap:2px}
 #field-bar .field-head{display:flex;align-items:baseline;gap:10px;justify-content:center}
 #field-bar .field-head .payout{margin-top:0}
@@ -278,6 +292,14 @@ body{
     <div id="felt-stage">
       <div id="numline"></div>
       <div class="bar" id="come-bar" data-bet="come"><span class="lbl">COME</span><span class="payout" id="pay-come"></span></div>
+      <div id="center-bar">
+        <div class="prop" id="prop-hard4" data-bet="hard4"><span class="lbl">HARD 4</span><span class="po">7:1</span></div>
+        <div class="prop" id="prop-hard6" data-bet="hard6"><span class="lbl">HARD 6</span><span class="po">9:1</span></div>
+        <div class="prop" id="prop-hard8" data-bet="hard8"><span class="lbl">HARD 8</span><span class="po">9:1</span></div>
+        <div class="prop" id="prop-hard10" data-bet="hard10"><span class="lbl">HARD 10</span><span class="po">7:1</span></div>
+        <div class="prop" id="prop-any7" data-bet="any7"><span class="lbl">ANY 7</span><span class="po">4:1</span></div>
+        <div class="prop" id="prop-anyCraps" data-bet="anyCraps"><span class="lbl">ANY CRAPS</span><span class="po">7:1</span></div>
+      </div>
       <div class="bar" id="field-bar" data-bet="field">
         <span class="field-head"><span class="lbl">FIELD</span><span class="payout" id="pay-field"></span></span>
         <span class="nums"><span class="dbl">2</span> 3 4 9 10 11 <span class="dbl">12</span></span>
@@ -409,6 +431,7 @@ body{
     if (key === 'field') return true;
     if (key.startsWith('place')) return !!G.run.unlocks.place;
     if (key.startsWith('buy')) return !!G.run.unlocks.buy;
+    if (/^hard(4|6|8|10)$/.test(key) || key === 'any7' || key === 'anyCraps') return !!G.run.unlocks[key]; // center props
     return false;
   }
   function canRemove(key) {
@@ -455,7 +478,7 @@ body{
     G.s.Bets[oddsKey] = cur - take; if (G.s.Bets[oddsKey] <= 0) delete G.s.Bets[oddsKey];
     G.stake += take; render();
   }
-  document.querySelectorAll('.bar[data-bet]').forEach((el) => {
+  document.querySelectorAll('[data-bet]').forEach((el) => {   // bars + center props
     const key = el.dataset.bet;
     el.addEventListener('click', () => place(key));
     el.addEventListener('contextmenu', (e) => { e.preventDefault(); remove(key); });
@@ -810,8 +833,9 @@ body{
   function feltSpotEl(key) {
     if (key === 'passodds') return document.querySelector('.bar[data-bet="pass"]');
     if (key === 'dpodds') return document.querySelector('.bar[data-bet="dp"]');
-    if (['pass', 'dp', 'come', 'field'].includes(key)) return document.querySelector('.bar[data-bet="' + key + '"]');
-    const m = key.match(/^(place|buy|come|dc|hard)(\d+)$/);
+    if (['pass', 'dp', 'come', 'field', 'any7', 'anyCraps'].includes(key)) return document.querySelector('[data-bet="' + key + '"]');
+    if (/^hard(4|6|8|10)$/.test(key)) return document.querySelector('[data-bet="' + key + '"]');
+    const m = key.match(/^(place|buy|come|dc)(\d+)$/);
     if (m) return $('num-' + m[2]);
     return null;
   }
@@ -964,9 +988,16 @@ body{
     const placeOff = s && !act;
 
     // bet chips + gating (Pass shows a lock once its contract is locked on a point)
+    // center props: reveal the panel + each unlocked prop spot
+    let anyCenter = false;
+    ['hard4', 'hard6', 'hard8', 'hard10', 'any7', 'anyCraps'].forEach((k) => {
+      const on = !!run.unlocks[k]; $('prop-' + k).classList.toggle('show', on); if (on) anyCenter = true;
+    });
+    $('felt-stage').classList.toggle('has-center', anyCenter);
+
     const oddsAvail = (key) => (key === 'pass' || key === 'dp') && s && s.Phase === Phase.Point
       && (s.Bets[key] || 0) > 0 && RLC.maxOddsMult(G.run, s.Point) > 0;
-    document.querySelectorAll('.bar[data-bet]').forEach((el) => {
+    document.querySelectorAll('[data-bet]').forEach((el) => {
       const key = el.dataset.bet;
       el.querySelectorAll('.chip').forEach((c) => c.remove());
       const amt = (s && s.Bets[key]) || 0;

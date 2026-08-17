@@ -149,7 +149,7 @@ const freshRun = () => R.initRun(RL.newRun());
   eq('1 consumable offered', 1, shop.consumables.length);
   eq('table access offered while a bet type is locked', 1, shop.table.length);
   // after unlocking every table bet type, no table offer
-  ['place', 'buy', 'doubleOdds', 'tableOdds', 'fiveOdds'].forEach((u) => { run.unlocks[u] = true; });
+  ['place', 'buy', 'doubleOdds', 'tableOdds', 'fiveOdds', 'hard4', 'hard6', 'hard8', 'hard10', 'any7', 'anyCraps'].forEach((u) => { run.unlocks[u] = true; });
   const shop2 = R.generateShop(run, () => 0.3);
   eq('no table offer once all unlocked', 0, shop2.table.length); }
 

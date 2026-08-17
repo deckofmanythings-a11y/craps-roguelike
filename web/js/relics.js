@@ -83,6 +83,12 @@
     { id: 'tbl_odds2', name: 'Double Odds', type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'doubleOdds' }, desc: "Unlock 2x odds behind Pass / Come / Don't." },
     { id: 'tbl_odds345', name: 'Table Odds', type: 'table', tier: 'rare', price: 20, table: { unlock: 'tableOdds', prereq: 'doubleOdds' }, desc: 'Unlock 3x/4x/5x odds (3x on 4 & 10, 4x on 5 & 9, 5x on 6 & 8). Needs Double Odds.' },
     { id: 'tbl_odds5', name: 'Five Times Odds', type: 'table', tier: 'rare', price: 20, table: { unlock: 'fiveOdds', prereq: 'tableOdds' }, desc: 'Unlock 5x odds on all points. Needs Table Odds.' },
+    { id: 'tbl_hard4',  name: 'Hard Four',  type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'hard4' },  desc: 'Unlock the Hard Four bet (pays 7:1).' },
+    { id: 'tbl_hard6',  name: 'Hard Six',   type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'hard6' },  desc: 'Unlock the Hard Six bet (pays 9:1).' },
+    { id: 'tbl_hard8',  name: 'Hard Eight', type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'hard8' },  desc: 'Unlock the Hard Eight bet (pays 9:1).' },
+    { id: 'tbl_hard10', name: 'Hard Ten',   type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'hard10' }, desc: 'Unlock the Hard Ten bet (pays 7:1).' },
+    { id: 'tbl_any7',   name: 'Big Red',    type: 'table', tier: 'common',   price: 5,  table: { unlock: 'any7' },   desc: 'Unlock the Any Seven bet (pays 4:1).' },
+    { id: 'tbl_craps',  name: 'Craps',      type: 'table', tier: 'common',   price: 5,  table: { unlock: 'anyCraps' }, desc: 'Unlock the Any Craps bet (pays 7:1).' },
 
     // -- consumables (single-use, held) --
     { id: 'con_comp',   name: 'Comp Chip',   type: 'consumable', tier: 'common', price: 4, consumable: { kind: 'comp', amount: 50 }, desc: 'Use anytime: +$50 to your current bullet stake.' },
