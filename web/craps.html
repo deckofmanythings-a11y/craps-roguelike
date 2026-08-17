@@ -189,6 +189,22 @@ body{
 #msg{width:100%;max-width:1100px;min-height:20px;text-align:center;color:#bfe0cc;font-family:var(--font-script);font-size:14px;padding:0 14px 18px}
 .hint{color:#6f9a80;font-size:11px;font-family:var(--font-script)}
 
+/* ---- hop grid (Horn + hop bets, appears when unlocked) ---- */
+#hop-grid{display:none;width:100%;max-width:1100px;margin:0 auto;padding:8px 14px 0;flex-wrap:wrap;gap:5px;align-items:center;justify-content:center}
+#hop-grid.show{display:flex}
+.hop-cell{display:none;position:relative;flex-direction:column;align-items:center;justify-content:center;
+  min-width:44px;height:44px;background:var(--box-fill-darkest);border:1px solid rgba(255,255,255,.25);
+  border-radius:5px;cursor:pointer;padding:2px 5px;transition:box-shadow .1s,filter .1s}
+.hop-cell.show{display:flex}
+.hop-cell .hl{font-size:12px;font-weight:900;color:#ffd9a0;line-height:1.05}
+.hop-cell .hp{font-size:8px;font-weight:900;color:var(--color-gold);line-height:1}
+.hop-cell.horn-cell{min-width:64px;background:var(--box-fill-lightest)}
+.hop-cell.horn-cell .hp{color:#dfeee6;font-family:var(--font-script)}
+.hop-cell.clickable:hover{box-shadow:0 0 0 2px var(--color-gold),0 0 12px rgba(255,215,0,.3) inset}
+.hop-cell.disabled{opacity:.4;cursor:not-allowed}
+.hop-cell .chip{width:32px;height:32px}
+.hop-cell .chip .chip-amt{font-size:9px}
+
 /* ---- relic strip (owned relics + the two dice you build) ---- */
 #relic-strip{width:100%;max-width:1100px;padding:6px 14px 0;display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12px}
 #owned-relics{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
@@ -313,6 +329,8 @@ body{
     </div>
   </div>
 
+  <div id="hop-grid"></div>
+
   <div id="relic-strip">
     <div id="owned-relics"></div>
     <div class="dice-build">
@@ -381,6 +399,9 @@ body{
   const MIN_CHIP = Math.min(...DENOMS);      // smallest bet you can make
   const CHIP_ART = [100, 50, 25, 10, 5, 1]; // available chip-blank-N.webp, largest first
   const chipDenom = (a) => CHIP_ART.find((d) => a >= d) || 1;
+  // all 21 hop combos (unordered): {key:'hopAB', a, b, pair}
+  const HOPS = [];
+  for (let a = 1; a <= 6; a++) for (let b = a; b <= 6; b++) HOPS.push({ key: 'hop' + a + b, a, b, pair: a === b });
   const $ = (id) => document.getElementById(id);
   const money = (n) => '$' + (Math.round(n * 100) / 100).toLocaleString('en-US');
   const signed = (n) => (n >= 0 ? '+' : '−') + '$' + Math.abs(Math.round(n * 100) / 100).toLocaleString('en-US');
@@ -409,6 +430,19 @@ body{
       b.onclick = () => { G.chip = d; render(); };
       rail.appendChild(b);
     });
+    // Hop grid: Horn cell + all 21 hop cells (data-bet). Built here so the
+    // top-level [data-bet] binding below picks them up; shown per unlock in render.
+    const hg = $('hop-grid');
+    const horn = document.createElement('div');
+    horn.className = 'hop-cell horn-cell'; horn.dataset.bet = 'horn';
+    horn.innerHTML = '<span class="hl">HORN</span><span class="hp">2·3·11·12</span>';
+    hg.appendChild(horn);
+    HOPS.forEach((h) => {
+      const c = document.createElement('div');
+      c.className = 'hop-cell'; c.dataset.bet = h.key;
+      c.innerHTML = `<span class="hl">${h.a}-${h.b}</span><span class="hp">${h.pair ? '30:1' : '15:1'}</span>`;
+      hg.appendChild(c);
+    });
   })();
 
   // ---- betting ----
@@ -432,6 +466,8 @@ body{
     if (key.startsWith('place')) return !!G.run.unlocks.place;
     if (key.startsWith('buy')) return !!G.run.unlocks.buy;
     if (/^hard(4|6|8|10)$/.test(key) || key === 'any7' || key === 'anyCraps') return !!G.run.unlocks[key]; // center props
+    if (key === 'horn') return !!G.run.unlocks.horn;
+    if (/^hop\d\d$/.test(key)) return RLC.hopUnlocked(G.run, key);
     return false;
   }
   function canRemove(key) {
@@ -798,6 +834,8 @@ body{
     midnight: 'Midnight', bonusLow: 'Low Rolls', bonusHigh: 'High Rolls', bonusAll: "Roll'em All" };
   function labelFor(k) {
     if (BET_LABELS[k]) return BET_LABELS[k];
+    const hop = k.match(/^hop(\d)(\d)$/);
+    if (hop) return 'Hop ' + hop[1] + '-' + hop[2];
     const m = k.match(/^(place|buy|hard|come|dc)(\d+)$/);
     if (m) return ({ place: 'Place', buy: 'Buy', hard: 'Hard', come: 'Come', dc: "Don't Come" }[m[1]]) + ' ' + m[2];
     return k;
@@ -833,8 +871,8 @@ body{
   function feltSpotEl(key) {
     if (key === 'passodds') return document.querySelector('.bar[data-bet="pass"]');
     if (key === 'dpodds') return document.querySelector('.bar[data-bet="dp"]');
-    if (['pass', 'dp', 'come', 'field', 'any7', 'anyCraps'].includes(key)) return document.querySelector('[data-bet="' + key + '"]');
-    if (/^hard(4|6|8|10)$/.test(key)) return document.querySelector('[data-bet="' + key + '"]');
+    if (['pass', 'dp', 'come', 'field', 'any7', 'anyCraps', 'horn'].includes(key)) return document.querySelector('[data-bet="' + key + '"]');
+    if (/^hard(4|6|8|10)$/.test(key) || /^hop\d\d$/.test(key)) return document.querySelector('[data-bet="' + key + '"]');
     const m = key.match(/^(place|buy|come|dc)(\d+)$/);
     if (m) return $('num-' + m[2]);
     return null;
@@ -994,6 +1032,16 @@ body{
       const on = !!run.unlocks[k]; $('prop-' + k).classList.toggle('show', on); if (on) anyCenter = true;
     });
     $('felt-stage').classList.toggle('has-center', anyCenter);
+
+    // hop grid: Horn cell + each unlocked hop cell
+    let anyHop = !!run.unlocks.horn;
+    document.querySelector('[data-bet="horn"]').classList.toggle('show', !!run.unlocks.horn);
+    HOPS.forEach((h) => {
+      const on = RLC.hopUnlocked(run, h.key);
+      document.querySelector('[data-bet="' + h.key + '"]').classList.toggle('show', on);
+      if (on) anyHop = true;
+    });
+    $('hop-grid').classList.toggle('show', anyHop);
 
     const oddsAvail = (key) => (key === 'pass' || key === 'dp') && s && s.Phase === Phase.Point
       && (s.Bets[key] || 0) > 0 && RLC.maxOddsMult(G.run, s.Point) > 0;

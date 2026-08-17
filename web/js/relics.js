@@ -89,6 +89,9 @@
     { id: 'tbl_hard10', name: 'Hard Ten',   type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'hard10' }, desc: 'Unlock the Hard Ten bet (pays 7:1).' },
     { id: 'tbl_any7',   name: 'Big Red',    type: 'table', tier: 'common',   price: 5,  table: { unlock: 'any7' },   desc: 'Unlock the Any Seven bet (pays 4:1).' },
     { id: 'tbl_craps',  name: 'Craps',      type: 'table', tier: 'common',   price: 5,  table: { unlock: 'anyCraps' }, desc: 'Unlock the Any Craps bet (pays 7:1).' },
+    { id: 'tbl_horn',   name: 'Horn Bet',     type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'horn' },        desc: 'Unlock the Horn bet + the hopping 2, 12, 3, 11.' },
+    { id: 'tbl_hwhops', name: 'Hardway Hops', type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'hardwayHops' }, desc: 'Unlock the hop bets for 22, 33, 44, 55.' },
+    { id: 'tbl_hops',   name: 'Hop Bets',     type: 'table', tier: 'rare',     price: 20, table: { unlock: 'hopBets' },     desc: 'Unlock all the 16-for-1 hop bets.' },
 
     // -- consumables (single-use, held) --
     { id: 'con_comp',   name: 'Comp Chip',   type: 'consumable', tier: 'common', price: 4, consumable: { kind: 'comp', amount: 50 }, desc: 'Use anytime: +$50 to your current bullet stake.' },
@@ -324,6 +327,22 @@
     return 0;
   }
 
+  // Is a specific hop (key 'hopAB') unlocked, given the owned Horn / Hardway Hops
+  // / Hop Bets rules? Horn grants the 2/12/3/11 hops (hop11/hop66/hop12/hop56);
+  // Hardway Hops grants 22/33/44/55; Hop Bets grants every 16-for-1 (non-pair) hop.
+  const HARDWAY_HOP = { hop22: 1, hop33: 1, hop44: 1, hop55: 1 };
+  function hopUnlocked(run, key) {
+    const a = +key[3], b = +key[4], pair = a === b;
+    if (pair) {
+      if ((key === 'hop11' || key === 'hop66') && run.unlocks.horn) return true;
+      if (HARDWAY_HOP[key] && run.unlocks.hardwayHops) return true;
+      return false;
+    }
+    if (run.unlocks.hopBets) return true;
+    if ((key === 'hop12' || key === 'hop56') && run.unlocks.horn) return true; // the 3 & 11 hops
+    return false;
+  }
+
   // Interest paid on entering a shop (Balatro-style). Mutates run.markers.
   function payInterest(run) {
     let paid = 0;
@@ -340,6 +359,6 @@
     def, initRun, slotsMax, slotsUsed, extraBullets, faceEmptyCount,
     priceOf, rerollCost, canAcquire,
     acquireSimple, installFace, installFelt,
-    diceWeights, rollDice, postResolve, generateShop, payInterest, maxOddsMult,
+    diceWeights, rollDice, postResolve, generateShop, payInterest, maxOddsMult, hopUnlocked,
   };
 });

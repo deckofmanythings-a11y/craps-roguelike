@@ -149,9 +149,27 @@ const freshRun = () => R.initRun(RL.newRun());
   eq('1 consumable offered', 1, shop.consumables.length);
   eq('table access offered while a bet type is locked', 1, shop.table.length);
   // after unlocking every table bet type, no table offer
-  ['place', 'buy', 'doubleOdds', 'tableOdds', 'fiveOdds', 'hard4', 'hard6', 'hard8', 'hard10', 'any7', 'anyCraps'].forEach((u) => { run.unlocks[u] = true; });
+  ['place', 'buy', 'doubleOdds', 'tableOdds', 'fiveOdds', 'hard4', 'hard6', 'hard8', 'hard10', 'any7', 'anyCraps', 'horn', 'hardwayHops', 'hopBets'].forEach((u) => { run.unlocks[u] = true; });
   const shop2 = R.generateShop(run, () => 0.3);
   eq('no table offer once all unlocked', 0, shop2.table.length); }
+
+// --- hop unlock gating: Horn / Hardway Hops / Hop Bets grant the right hops ---
+{ const run = freshRun();
+  check('nothing hopping by default', !R.hopUnlocked(run, 'hop12') && !R.hopUnlocked(run, 'hop22') && !R.hopUnlocked(run, 'hop34'));
+  run.unlocks.horn = true;
+  check('Horn grants the 3 (1-2)', R.hopUnlocked(run, 'hop12'));
+  check('Horn grants the 11 (5-6)', R.hopUnlocked(run, 'hop56'));
+  check('Horn grants the 2 (1-1)', R.hopUnlocked(run, 'hop11'));
+  check('Horn grants the 12 (6-6)', R.hopUnlocked(run, 'hop66'));
+  check('Horn does NOT grant hard hop 2-2', !R.hopUnlocked(run, 'hop22'));
+  check('Horn does NOT grant 3-4', !R.hopUnlocked(run, 'hop34'));
+  run.unlocks.hardwayHops = true;
+  check('Hardway Hops grants 2-2', R.hopUnlocked(run, 'hop22'));
+  check('Hardway Hops grants 5-5', R.hopUnlocked(run, 'hop55'));
+  check('still no 3-4 without Hop Bets', !R.hopUnlocked(run, 'hop34'));
+  run.unlocks.hopBets = true;
+  check('Hop Bets grants every 16-for-1 (3-4)', R.hopUnlocked(run, 'hop34'));
+  check('Hop Bets does not grant a pair it does not own (6-6 still via Horn only)', R.hopUnlocked(run, 'hop66')); }
 
 // --- odds multiples by unlock level ---
 { const run = freshRun();
