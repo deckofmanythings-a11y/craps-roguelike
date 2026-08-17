@@ -184,6 +184,9 @@ body{
 .die-col.roxy .nm{color:#ff9ec7}
 .die-col.trixie .nm{color:#c9a0ff}
 .faces{display:grid;grid-template-columns:repeat(6,1fr);gap:3px}
+.faces-paired{display:flex;gap:6px;align-items:center}
+.face-pair{display:flex;flex-direction:column;align-items:center;gap:0}
+.pair-arrow{font-size:10px;line-height:1;color:#9fb4a8;margin:1px 0}
 .face-slot{width:26px;height:26px;border-radius:5px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.18);
   display:flex;align-items:center;justify-content:center;font-size:9px;color:#6f9a80;position:relative}
 .face-slot .fv{position:absolute;top:1px;left:2px;font-size:7px;color:#4a6b57}
@@ -634,13 +637,7 @@ body{
   function renderInstall() {
     const { relic } = G.shop.install;
     if (relic.type === 'face') {
-      const grid = (die) => G.run.faces[die].map((slot, idx) => {
-        const filled = !!slot;
-        const canHere = !filled && die === relic.die;   // this relic is locked to its die
-        const cls = filled ? 'filled ' + slot.kind : (canHere ? 'installable' : 'locked');
-        return `<div class="face-slot ${cls}" data-die="${die}" data-idx="${idx}" ${canHere ? 'data-empty="1"' : ''}>
-          <span class="fv">${idx + 1}</span>${filled ? faceGlyph(slot.kind) : ''}</div>`;
-      }).join('');
+      const grid = (die) => pairedGridHTML(G.run, die, 'install', relic);
       overlay(
         `<h2 style="margin:0 0 4px">Install ${relic.name}</h2>
         <div class="install-hint">Goes on a <b>${relic.die === RLC.DIE.ROXY ? 'ROXY' : 'TRIXIE'}</b> face — click an open one.</div>
@@ -678,6 +675,24 @@ body{
   }
   function faceGlyph(kind) {
     return { gold: '$', glass: '◆', guardian: '🛡', heavy: '⬇', critical: '★', magnet: '⊘', field: '✦' }[kind] || '●';
+  }
+
+  // Dice faces are shown as the three OPPOSITE pairs stacked (6 over 1, 5 over 2,
+  // 4 over 3) with a double-headed arrow between — so the pairing that Heavy/Weighted
+  // relies on is obvious. mode 'install' marks the relic's-die empties clickable.
+  const OPP_PAIRS = [[6, 1], [5, 2], [4, 3]];
+  function faceSlotHTML(run, die, idx, mode, relic) {
+    const slot = run.faces[die][idx], filled = !!slot;
+    let cls = 'face-slot', attr = '';
+    if (filled) cls += ' filled ' + slot.kind;
+    else if (mode === 'install') { if (relic && die === relic.die) { cls += ' installable'; attr = ' data-empty="1"'; } else cls += ' locked'; }
+    const title = filled ? (RLC.def(slot.id).name + ' — ' + RLC.def(slot.id).desc) : ('empty · face ' + (idx + 1));
+    return `<div class="${cls}" data-die="${die}" data-idx="${idx}" title="${title}"${attr}><span class="fv">${idx + 1}</span>${filled ? faceGlyph(slot.kind) : ''}</div>`;
+  }
+  function pairedGridHTML(run, die, mode, relic) {
+    return '<div class="faces-paired">' + OPP_PAIRS.map(([hi, lo]) =>
+      `<div class="face-pair">${faceSlotHTML(run, die, hi - 1, mode, relic)}<span class="pair-arrow">⇅</span>${faceSlotHTML(run, die, lo - 1, mode, relic)}</div>`
+    ).join('') + '</div>';
   }
 
   function leaveShop() {
@@ -839,13 +854,7 @@ body{
     run.relics.forEach((id) => { const d = RLC.def(id); html += `<span class="relic-chip ${d.type === 'economy' ? 'eco' : ''}" title="${d.desc}">${d.name}</span>`; });
     Object.keys(run.feltMult).forEach((k) => { html += `<span class="relic-chip" title="Felt boost">Felt · ${k}</span>`; });
     owned.innerHTML = html || '<span class="hint">no relics yet</span>';
-    [1, 2].forEach((die) => {
-      $('faces-' + die).innerHTML = run.faces[die].map((slot, idx) => {
-        const cls = slot ? 'filled ' + slot.kind : '';
-        const title = slot ? RLC.def(slot.id).name + ' — ' + RLC.def(slot.id).desc : 'empty · face ' + (idx + 1);
-        return `<div class="face-slot ${cls}" title="${title}"><span class="fv">${idx + 1}</span>${slot ? faceGlyph(slot.kind) : ''}</div>`;
-      }).join('');
-    });
+    [1, 2].forEach((die) => { $('faces-' + die).innerHTML = pairedGridHTML(run, die, 'strip', null); });
   }
 
   function renderConsumables() {
