@@ -80,6 +80,9 @@
     // -- table access (unlock a bet type) --
     { id: 'tbl_place', name: 'Place Bets', type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'place' }, desc: 'Unlock Place bets on the number boxes (4·5·6·8·9·10) for the rest of the run.' },
     { id: 'tbl_buy',   name: 'Buy Bets',   type: 'table', tier: 'rare',     price: 15, table: { unlock: 'buy' },   desc: 'Unlock Buy bets (true odds, 5% vig) on the number boxes for the rest of the run.' },
+    { id: 'tbl_odds2', name: 'Double Odds', type: 'table', tier: 'uncommon', price: 10, table: { unlock: 'doubleOdds' }, desc: "Unlock 2x odds behind Pass / Come / Don't." },
+    { id: 'tbl_odds345', name: 'Table Odds', type: 'table', tier: 'rare', price: 20, table: { unlock: 'tableOdds', prereq: 'doubleOdds' }, desc: 'Unlock 3x/4x/5x odds (3x on 4 & 10, 4x on 5 & 9, 5x on 6 & 8). Needs Double Odds.' },
+    { id: 'tbl_odds5', name: 'Five Times Odds', type: 'table', tier: 'rare', price: 20, table: { unlock: 'fiveOdds', prereq: 'tableOdds' }, desc: 'Unlock 5x odds on all points. Needs Table Odds.' },
 
     // -- consumables (single-use, held) --
     { id: 'con_comp',   name: 'Comp Chip',   type: 'consumable', tier: 'common', price: 4, consumable: { kind: 'comp', amount: 50 }, desc: 'Use anytime: +$50 to your current bullet stake.' },
@@ -123,7 +126,7 @@
     if (relic.type === 'payout' || relic.type === 'economy') return slotsUsed(run) < slotsMax(run);
     if (relic.type === 'face') return faceEmptyCount(run) > 0;
     if (relic.type === 'voucher') return !run.vouchers.includes(relic.id) || relic.voucher.kind === 'slot' || relic.voucher.kind === 'bullet';
-    if (relic.type === 'table') return !run.unlocks[relic.table.unlock];
+    if (relic.type === 'table') return !run.unlocks[relic.table.unlock] && (!relic.table.prereq || !!run.unlocks[relic.table.prereq]);
     if (relic.type === 'consumable') return run.consumables.length < MAX_CONSUMABLES;
     if (relic.type === 'felt') return true;
     return true;
@@ -298,11 +301,21 @@
     // Diamond Pips only appears the shop AFTER a Glass/Crystal Pips broke.
     if (run.diamondOffer) { relics.unshift(def('face_diamond')); run.diamondOffer = false; }
     const consumables = sample(CATALOG.filter((r) => r.type === 'consumable'), 1, rng);
-    const tablePool = CATALOG.filter((r) => r.type === 'table' && !run.unlocks[r.table.unlock]);
+    const tablePool = CATALOG.filter((r) => r.type === 'table' && !run.unlocks[r.table.unlock] && (!r.table.prereq || !!run.unlocks[r.table.prereq]));
     const table = tablePool.length ? [weightedPick(tablePool, rng)] : [];
     const voucherPool = CATALOG.filter((r) => r.type === 'voucher' && canAcquire(run, r));
     const vouchers = (rng() < 0.5 && voucherPool.length) ? [weightedPick(voucherPool, rng)] : [];
     return { relics, consumables, table, vouchers };
+  }
+
+  // Max odds MULTIPLE allowed behind the line for a given point, per what's unlocked.
+  // Five Times: 5x all. Table Odds: 3x on 4&10, 4x on 5&9, 5x on 6&8. Double: 2x all.
+  const TABLE_ODDS = { 4: 3, 10: 3, 5: 4, 9: 4, 6: 5, 8: 5 };
+  function maxOddsMult(run, point) {
+    if (run.unlocks.fiveOdds) return 5;
+    if (run.unlocks.tableOdds) return TABLE_ODDS[point] || 0;
+    if (run.unlocks.doubleOdds) return 2;
+    return 0;
   }
 
   // Interest paid on entering a shop (Balatro-style). Mutates run.markers.
@@ -321,6 +334,6 @@
     def, initRun, slotsMax, slotsUsed, extraBullets, faceEmptyCount,
     priceOf, rerollCost, canAcquire,
     acquireSimple, installFace, installFelt,
-    diceWeights, rollDice, postResolve, generateShop, payInterest,
+    diceWeights, rollDice, postResolve, generateShop, payInterest, maxOddsMult,
   };
 });

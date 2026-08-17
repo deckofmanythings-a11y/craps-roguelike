@@ -149,9 +149,33 @@ const freshRun = () => R.initRun(RL.newRun());
   eq('1 consumable offered', 1, shop.consumables.length);
   eq('table access offered while a bet type is locked', 1, shop.table.length);
   // after unlocking every table bet type, no table offer
-  run.unlocks.place = true; run.unlocks.buy = true;
+  ['place', 'buy', 'doubleOdds', 'tableOdds', 'fiveOdds'].forEach((u) => { run.unlocks[u] = true; });
   const shop2 = R.generateShop(run, () => 0.3);
   eq('no table offer once all unlocked', 0, shop2.table.length); }
+
+// --- odds multiples by unlock level ---
+{ const run = freshRun();
+  eq('no odds by default', 0, R.maxOddsMult(run, 6));
+  run.unlocks.doubleOdds = true;
+  eq('Double = 2x on 4', 2, R.maxOddsMult(run, 4));
+  eq('Double = 2x on 6', 2, R.maxOddsMult(run, 6));
+  run.unlocks.tableOdds = true;
+  eq('Table = 3x on 4', 3, R.maxOddsMult(run, 4));
+  eq('Table = 4x on 5', 4, R.maxOddsMult(run, 5));
+  eq('Table = 5x on 6', 5, R.maxOddsMult(run, 6));
+  run.unlocks.fiveOdds = true;
+  eq('Five Times = 5x on 4', 5, R.maxOddsMult(run, 4)); }
+
+// --- odds table-access prerequisite chain ---
+{ const run = freshRun();
+  check('Double Odds available', R.canAcquire(run, R.def('tbl_odds2')));
+  check('Table Odds blocked without Double', !R.canAcquire(run, R.def('tbl_odds345')));
+  check('Five Times blocked without Table', !R.canAcquire(run, R.def('tbl_odds5')));
+  run.unlocks.doubleOdds = true;
+  check('Table Odds available after Double', R.canAcquire(run, R.def('tbl_odds345')));
+  check('Five Times still blocked', !R.canAcquire(run, R.def('tbl_odds5')));
+  run.unlocks.tableOdds = true;
+  check('Five Times available after Table', R.canAcquire(run, R.def('tbl_odds5'))); }
 
 // --- interest pays on shop entry ---
 { const run = freshRun(); run.markers = 12;

@@ -126,6 +126,8 @@ body{
 .chip-amt{position:relative;z-index:2;color:#fff;font-weight:900;font-family:var(--font-heavy);
   font-size:clamp(9px,1.25vw,14px);text-shadow:0 1px 2px #000,0 0 3px rgba(0,0,0,.9)}
 .chip .lock{position:absolute;z-index:3;bottom:-5px;right:-6px;font-size:12px;line-height:1;filter:drop-shadow(0 1px 1px #000)}
+.chip.odds-chip{left:72%;top:70%;width:clamp(22px,3.6vw,42px);height:clamp(22px,3.6vw,42px);opacity:.95}
+.chip.odds-chip .chip-amt{font-size:clamp(8px,1vw,12px)}
 .chip .off{position:absolute;top:-7px;left:50%;transform:translateX(-50%);background:#b02020;color:#fff;
   font-size:8px;font-weight:900;padding:0 3px;border-radius:3px;border:1px solid #fff;letter-spacing:.05em;font-family:var(--font-heavy)}
 #puck{position:absolute;z-index:6;width:clamp(28px,4.2vw,50px);height:clamp(28px,4.2vw,50px);border-radius:50%;
@@ -344,9 +346,9 @@ body{
   // - Comp Chip handouts are excluded: more ammo, not free progress.
   function lockedContracts() {
     const s = G.s; let v = 0;
-    if (s.PassLocked) v += (s.Bets.pass || 0) + (s.Bets.passodds || 0);
-    for (const c of s.ComeBets) v += c.Flat + c.Odds; // travelled come bets are contract
-    return v;
+    if (s.PassLocked) v += (s.Bets.pass || 0);          // only the flat Pass line is a locked contract
+    for (const c of s.ComeBets) v += c.Flat + c.Odds;   // travelled come bets are contract
+    return v;                                           // odds behind the line are removable -> counted
   }
   const bulletNet = () => G.stake + onTable() - lockedContracts() - RL.STAKE - G.stakeBonus;
 
@@ -415,6 +417,8 @@ body{
     return (G.s.Bets[key] || 0) > 0;
   }
   function place(key) {
+    // Pass/Don't clicked once a point is on -> lay odds behind the line instead.
+    if ((key === 'pass' || key === 'dp') && bulletLive() && G.s.Phase === Phase.Point) { layOdds(key); return; }
     if (!canPlace(key)) { message("Can't place " + key.toUpperCase() + ' right now.'); return; }
     if (G.stake < G.chip) { message('Not enough stake for a ' + money(G.chip) + ' chip.'); return; }
     G.stake -= G.chip;
@@ -422,11 +426,34 @@ body{
     render();
   }
   function remove(key) {
+    if ((key === 'pass' || key === 'dp') && bulletLive() && G.s.Phase === Phase.Point) { takeDownOdds(key); return; }
     if (!canRemove(key)) return;
     const cur = G.s.Bets[key] || 0, take = Math.min(G.chip, cur), left = cur - take;
     if (left > 0) G.s.Bets[key] = left; else delete G.s.Bets[key];
     G.stake += take;
     render();
+  }
+  // Odds behind the line: capped at maxOddsMult x the flat bet for the current point.
+  const oddsKeyFor = (lineKey) => lineKey === 'pass' ? 'passodds' : 'dpodds';
+  function layOdds(lineKey) {
+    const s = G.s, flat = s.Bets[lineKey] || 0;
+    const lbl = lineKey === 'pass' ? 'Pass Line' : "Don't Pass";
+    if (flat <= 0) { message('Put a ' + lbl + ' bet down on the come-out first, then add odds.'); return; }
+    const mult = RLC.maxOddsMult(G.run, s.Point);
+    if (mult <= 0) { message('Odds not unlocked — buy Double Odds in the shop.'); return; }
+    const oddsKey = oddsKeyFor(lineKey), cap = mult * flat, cur = s.Bets[oddsKey] || 0;
+    const add = Math.min(G.chip, cap - cur, G.stake);
+    if (add <= 0) { message(cur >= cap ? `Max odds on the ${s.Point} (${mult}x) reached.` : 'Not enough stake for that chip.'); return; }
+    G.stake -= add; s.Bets[oddsKey] = cur + add;
+    message(`Laid ${money(add)} odds behind ${lbl} (up to ${mult}x on the ${s.Point}).`);
+    render();
+  }
+  function takeDownOdds(lineKey) {
+    const oddsKey = oddsKeyFor(lineKey), cur = G.s.Bets[oddsKey] || 0;
+    if (cur <= 0) return;
+    const take = Math.min(G.chip, cur);
+    G.s.Bets[oddsKey] = cur - take; if (G.s.Bets[oddsKey] <= 0) delete G.s.Bets[oddsKey];
+    G.stake += take; render();
   }
   document.querySelectorAll('.bar[data-bet]').forEach((el) => {
     const key = el.dataset.bet;
@@ -781,6 +808,8 @@ body{
 
   // --- chip sweep: winners drop chips IN, losers sweep chips AWAY ---
   function feltSpotEl(key) {
+    if (key === 'passodds') return document.querySelector('.bar[data-bet="pass"]');
+    if (key === 'dpodds') return document.querySelector('.bar[data-bet="dp"]');
     if (['pass', 'dp', 'come', 'field'].includes(key)) return document.querySelector('.bar[data-bet="' + key + '"]');
     const m = key.match(/^(place|buy|come|dc|hard)(\d+)$/);
     if (m) return $('num-' + m[2]);
@@ -935,13 +964,21 @@ body{
     const placeOff = s && !act;
 
     // bet chips + gating (Pass shows a lock once its contract is locked on a point)
+    const oddsAvail = (key) => (key === 'pass' || key === 'dp') && s && s.Phase === Phase.Point
+      && (s.Bets[key] || 0) > 0 && RLC.maxOddsMult(G.run, s.Point) > 0;
     document.querySelectorAll('.bar[data-bet]').forEach((el) => {
       const key = el.dataset.bet;
-      el.querySelector('.chip')?.remove();
+      el.querySelectorAll('.chip').forEach((c) => c.remove());
       const amt = (s && s.Bets[key]) || 0;
       if (amt > 0) el.appendChild(chipEl(amt, { locked: key === 'pass' && s.PassLocked }));
-      el.classList.toggle('clickable', canPlace(key));
-      el.classList.toggle('disabled', !canPlace(key) && amt === 0);
+      if (key === 'pass' || key === 'dp') {
+        const odds = (s && s.Bets[oddsKeyFor(key)]) || 0;
+        if (odds > 0) { const c = chipEl(odds); c.classList.add('odds-chip'); el.appendChild(c); }
+      }
+      const clickable = canPlace(key) || oddsAvail(key);
+      el.classList.toggle('clickable', clickable);
+      el.classList.toggle('disabled', !clickable && amt === 0);
+      el.title = oddsAvail(key) ? `Click to lay odds (up to ${RLC.maxOddsMult(G.run, s.Point)}x on the ${s.Point})` : '';
     });
     // payout labels on the main bars (relics strike the base and rewrite it)
     ['pass', 'dp', 'come', 'field'].forEach((k) => { const p = $('pay-' + k); if (p) { const [a, b] = BASE_PAYOUT[k]; p.innerHTML = payoutHTML(a, b, effMult(k)); } });
